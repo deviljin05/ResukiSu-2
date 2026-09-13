@@ -180,6 +180,11 @@ jobs:
             echo "CONFIG_WLAN_VENDOR_MEDIATEK=y"
             echo "CONFIG_MT7601U=m"
 
+            # Realtek RTL8XXXU family (covers RTL8188CUS/CU, RTL8192CU,
+            # RTL8723AU, RTL8188EU) — separate driver from RTL8187, added
+            # for RTL8188CUS-based Alfa/generic USB adapters.
+            echo "CONFIG_RTL8XXXU=m"
+
             # Firmware + USB
             echo "CONFIG_FW_LOADER=y"
             echo "CONFIG_USB_SUPPORT=y"
@@ -409,6 +414,8 @@ jobs:
 
           rmmod mt7601u 2>/dev/null
           load mt7601u
+
+          load rtl8xxxu
 
           dmesg | grep -i -E "mt7601|firmware|cfg80211|mac80211|ath|ath9k|rt2x00|rt2800|rtl8187" >> $LOG 2>&1
 
