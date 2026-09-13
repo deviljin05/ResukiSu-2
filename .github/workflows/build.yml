@@ -1,4 +1,4 @@
-name: Build Custom GKI Kernel (ReSukiSU + SUSFS + BBRv3 + Neutron Clang)
+name: Build Custom GKI Kernel (ReSukiSU + SUSFS + BBRv3 + Wireless RTL)
 
 on:
   workflow_dispatch:
@@ -61,17 +61,6 @@ jobs:
       - name: Set up ccache
         run: mkdir -p "${CCACHE_DIR}"
 
-      - name: Download & Setup Neutron Clang
-        run: |
-          set -euo pipefail
-          mkdir -p ${GITHUB_WORKSPACE}/neutron-clang
-          cd ${GITHUB_WORKSPACE}/neutron-clang
-          curl -LO https://github.com/Neutron-Toolchains/antman/raw/main/antman
-          chmod +x antman
-          ./antman -S
-          ./antman --patch=glibc
-          echo "${GITHUB_WORKSPACE}/neutron-clang/bin" >> "$GITHUB_PATH"
-
       - name: Resolve manifest branch and optional pinned release tag
         run: |
           set -euo pipefail
@@ -100,14 +89,6 @@ jobs:
           cd kernel_workspace
           repo init -u https://android.googlesource.com/kernel/manifest -b "${MANIFEST_REF}" --depth=1
           repo sync -c --current-branch --no-clone-bundle --no-tags -j"$(nproc)"
-
-      - name: Force Override Stock Clang Prebuilts with Neutron
-        working-directory: kernel_workspace
-        run: |
-          set -euo pipefail
-          rm -rf prebuilts/clang/host/linux-x86/* || true
-          mkdir -p prebuilts/clang/host/linux-x86/clang-r416183b
-          cp -r ${GITHUB_WORKSPACE}/neutron-clang/* prebuilts/clang/host/linux-x86/clang-r416183b/
 
       - name: Pin kernel/common to exact tag or dated maintenance branch
         if: ${{ env.PIN_TYPE != '' }}
@@ -177,7 +158,18 @@ jobs:
             echo "CONFIG_CGROUP_BPF=y"
             echo "CONFIG_BPF_EVENTS=y"
             
-            # --- NEUTRON CLANG COMPATIBILITY ---
+            # --- WIRELESS RTLXXXU DRIVER CONFIGS ---
+            echo "CONFIG_CFG80211=y"
+            echo "CONFIG_MAC80211=y"
+            echo "CONFIG_NETDEVICES=y"
+            echo "CONFIG_WLAN=y"
+            echo "CONFIG_WLAN_VENDOR_REALTEK=y"
+            echo "CONFIG_RTL8187=y"
+            echo "CONFIG_RTL_CARDS=y"
+            echo "CONFIG_RTL8192CU=y"
+            echo "CONFIG_RTL8XXXU=y"
+            echo "CONFIG_RTL8XXXU_UNTESTED=y"
+            
             echo "CONFIG_WERROR=n"
           } >> gki_defconfig
 
@@ -494,26 +486,14 @@ jobs:
           grep -rl '^MODULES_ORDER=' build.config* 2>/dev/null | xargs -r sed -i 's/^MODULES_ORDER=.*/MODULES_ORDER=/' || true
           grep -rl '^MODULES_LIST=' build.config* 2>/dev/null | xargs -r sed -i 's/^MODULES_LIST=.*/MODULES_LIST=/' || true
 
-      - name: Build kernel with Neutron Clang
+      - name: Build kernel
         working-directory: kernel_workspace
         run: |
           set -euo pipefail
-          export PATH="${GITHUB_WORKSPACE}/neutron-clang/bin:$PATH"
-          export CLANG_PREBUILT_BIN="${GITHUB_WORKSPACE}/neutron-clang/bin"
-          export REAL_CC="${GITHUB_WORKSPACE}/neutron-clang/bin/clang"
-          
-          # Clang version check step to verify Neutron active build
-          echo "=== VERIFYING ACTIVE CLANG VERSION ==="
-          clang --version
-          
           LTO=thin \
           BUILD_CONFIG=common/build.config.gki.aarch64 \
           USE_CCACHE=1 \
           CCACHE_DIR="${CCACHE_DIR}" \
-          CC=clang \
-          LLVM=1 \
-          LLVM_IAS=1 \
-          CLANG_PREBUILT_BIN="${GITHUB_WORKSPACE}/neutron-clang/bin" \
           build/build.sh -j"$(nproc)"
 
       - name: Verify final configs
