@@ -235,6 +235,7 @@ jobs:
           grep -rl '^KMI_DEFINITION_ERROR=' build.config* 2>/dev/null | xargs -r sed -i 's/^KMI_DEFINITION_ERROR=.*/KMI_DEFINITION_ERROR=0/' || true
           grep -rl '^MODULES_LIST=' build.config* 2>/dev/null | xargs -r sed -i 's/^MODULES_LIST=.*/MODULES_LIST=/' || true
           grep -rl '^MODULES_ORDER=' build.config* 2>/dev/null | xargs -r sed -i 's/^MODULES_ORDER=.*/MODULES_ORDER=/' || true
+          grep -rl '^KMI_SYMBOL_LIST=' build.config* 2>/dev/null | xargs -r sed -i 's/^KMI_SYMBOL_LIST=.*/KMI_SYMBOL_LIST=/' || true
 
       - name: Build kernel
         working-directory: kernel_workspace
