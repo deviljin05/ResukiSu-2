@@ -101,11 +101,13 @@ jobs:
           repo init -u https://android.googlesource.com/kernel/manifest -b "${MANIFEST_REF}" --depth=1
           repo sync -c --current-branch --no-clone-bundle --no-tags -j"$(nproc)"
 
-      - name: Purge Stock Clang Prebuilts
+      - name: Force Override Stock Clang Prebuilts with Neutron
         working-directory: kernel_workspace
         run: |
           set -euo pipefail
           rm -rf prebuilts/clang/host/linux-x86/* || true
+          mkdir -p prebuilts/clang/host/linux-x86/clang-r416183b
+          cp -r ${GITHUB_WORKSPACE}/neutron-clang/* prebuilts/clang/host/linux-x86/clang-r416183b/
 
       - name: Pin kernel/common to exact tag or dated maintenance branch
         if: ${{ env.PIN_TYPE != '' }}
@@ -497,8 +499,12 @@ jobs:
         run: |
           set -euo pipefail
           export PATH="${GITHUB_WORKSPACE}/neutron-clang/bin:$PATH"
-          export REAL_CC="${GITHUB_WORKSPACE}/neutron-clang/bin/clang"
           export CLANG_PREBUILT_BIN="${GITHUB_WORKSPACE}/neutron-clang/bin"
+          export REAL_CC="${GITHUB_WORKSPACE}/neutron-clang/bin/clang"
+          
+          # Clang version check step to verify Neutron active build
+          echo "=== VERIFYING ACTIVE CLANG VERSION ==="
+          clang --version
           
           LTO=thin \
           BUILD_CONFIG=common/build.config.gki.aarch64 \
@@ -507,6 +513,7 @@ jobs:
           CC=clang \
           LLVM=1 \
           LLVM_IAS=1 \
+          CLANG_PREBUILT_BIN="${GITHUB_WORKSPACE}/neutron-clang/bin" \
           build/build.sh -j"$(nproc)"
 
       - name: Verify final configs
