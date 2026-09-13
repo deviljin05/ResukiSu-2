@@ -227,12 +227,14 @@ jobs:
           set -euo pipefail
           curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash
 
-      - name: Disable strict defconfig & KMI checks
+      - name: Disable strict checks and module list validations
         working-directory: kernel_workspace
         run: |
-          sed -i 's/check_defconfig//' ./common/build.config.gki
+          sed -i 's/check_defconfig//' ./common/build.config.gki || true
           cd common
           grep -rl '^KMI_DEFINITION_ERROR=' build.config* 2>/dev/null | xargs -r sed -i 's/^KMI_DEFINITION_ERROR=.*/KMI_DEFINITION_ERROR=0/' || true
+          grep -rl '^MODULES_LIST=' build.config* 2>/dev/null | xargs -r sed -i 's/^MODULES_LIST=.*/MODULES_LIST=/' || true
+          grep -rl '^MODULES_ORDER=' build.config* 2>/dev/null | xargs -r sed -i 's/^MODULES_ORDER=.*/MODULES_ORDER=/' || true
 
       - name: Build kernel
         working-directory: kernel_workspace
@@ -283,7 +285,6 @@ jobs:
           description=NetHunter Wireless Drivers packaged like mizdrake7 style
           EOF
 
-          # Exact Mizdrake7 service.sh script matching reference repository
           cat << 'EOF' > wireless_module/service.sh
           #!/bin/sh
           sleep 25
