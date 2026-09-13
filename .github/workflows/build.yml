@@ -164,7 +164,7 @@ jobs:
             echo "CONFIG_CRC_CCITT=m"
             echo "CONFIG_CRC_ITU_T=m"
 
-            # --- NET HUNTER MODULAR WIRELESS (ALL "=m" PREVENTS BOOTLOOP) ---
+            # --- NET HUNTER MODULAR WIRELESS ---
             echo "CONFIG_NETDEVICES=y"
             echo "CONFIG_WLAN=y"
             echo "CONFIG_WIRELESS=y"
@@ -329,7 +329,7 @@ jobs:
           CCACHE_DIR="${CCACHE_DIR}" \
           build/build.sh -j"$(nproc)"
 
-      - name: Locate built Image
+      - name: Locate built Image and Modules
         working-directory: kernel_workspace
         run: |
           set -euo pipefail
@@ -339,6 +339,10 @@ jobs:
           fi
           [ -n "$IMG" ]
           echo "IMG_PATH=kernel_workspace/${IMG}" >> "$GITHUB_ENV"
+          
+          # Find where modules are archived or staged in out/
+          DIST_DIR=$(dirname "${IMG}")
+          echo "DIST_DIR=kernel_workspace/${DIST_DIR}" >> "$GITHUB_ENV"
 
       - name: Package Clean AnyKernel3 Kernel Zip
         run: |
@@ -354,8 +358,12 @@ jobs:
           mkdir -p wireless_module/system/lib/modules
           mkdir -p wireless_module/META-INF/com/google/android
 
-          # Copy compiled kernel modules (.ko)
-          find kernel_workspace/out -name "*.ko" -exec cp {} wireless_module/system/lib/modules/ \; || true
+          # Correctly extract modules from the GKI distribution archive or out path
+          if [ -f "${{ env.DIST_DIR }}/kernel_modules.tar.gz" ]; then
+            tar -xzf "${{ env.DIST_DIR }}/kernel_modules.tar.gz" -C wireless_module/system/lib/modules
+          else
+            find kernel_workspace/out -name "*.ko" -exec cp {} wireless_module/system/lib/modules/ \; || true
+          fi
 
           # Create module.prop
           cat << 'EOF' > wireless_module/module.prop
@@ -408,12 +416,34 @@ jobs:
 
           chmod +x wireless_module/service.sh
 
-          # Create dummy updater-script for Magisk / KernelSU installer
-          echo "update-binary" > wireless_module/META-INF/com/google/android/update-binary
+          # Create proper Magisk update-binary / updater-script structure
+          cat << 'EOF' > wireless_module/META-INF/com/google/android/updater-script
+          #
+          ui_print("*************************************************");
+          ui_print("      Wireless NetHunter Drivers & Firmware      ");
+          ui_print("*************************************************");
+          set_perm_recursive(0, 0, 0755, 0644, 0322, 0755);
+          EOF
+
+          curl -sSL "https://raw.githubusercontent.com/topjohnwu/Magisk/master/scripts/util_functions.sh" -o wireless_module/META-INF/com/google/android/util_functions.sh || true
+
           cat << 'EOF' > wireless_module/META-INF/com/google/android/update-binary
           #!/sbin/sh
-          echo "Installing Wireless Firmware Module..."
+          OUTFD=$2
+          ZIPFILE=$3
+          mount /data 2>/dev/null
+          unzip -o "$ZIPFILE" 'common/*' -d /tmp 2>/dev/null
+          ui_print "Installing Wireless Firmware Module..."
+          mkdir -p /data/adb/modules/Wireless-firmware
+          cp -rf system /data/adb/modules/Wireless-firmware/
+          cp -rf service.sh /data/adb/modules/Wireless-firmware/
+          cp -rf module.prop /data/adb/modules/Wireless-firmware/
+          touch /data/adb/modules/Wireless-firmware/update
+          ui_print "Installation complete!"
+          exit 0
           EOF
+
+          chmod +x wireless_module/META-INF/com/google/android/update-binary
 
           cd wireless_module
           zip -r9 -q "../Wireless-Firmware-KSU-Module.zip" .
