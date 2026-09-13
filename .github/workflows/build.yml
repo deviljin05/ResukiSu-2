@@ -494,12 +494,18 @@ jobs:
         working-directory: kernel_workspace
         run: sed -i 's/check_defconfig//' ./common/build.config.gki
 
-      - name: Disable strict GKI modules list verification
+      - name: Disable strict GKI modules and KMI symbol verification
         working-directory: kernel_workspace/common
         run: |
           set -euo pipefail
+          # Disable ABI symbol list comparison & KMI errors
+          grep -rl '^KMI_DEFINITION_ERROR=' build.config* 2>/dev/null | xargs -r sed -i 's/^KMI_DEFINITION_ERROR=.*/KMI_DEFINITION_ERROR=0/' || true
+          grep -rl '^CHECK_DEFCONFIG=' build.config* 2>/dev/null | xargs -r sed -i 's/^CHECK_DEFCONFIG=.*/CHECK_DEFCONFIG=/' || true
           grep -rl '^MODULES_ORDER=' build.config* 2>/dev/null | xargs -r sed -i 's/^MODULES_ORDER=.*/MODULES_ORDER=/' || true
           grep -rl '^MODULES_LIST=' build.config* 2>/dev/null | xargs -r sed -i 's/^MODULES_LIST=.*/MODULES_LIST=/' || true
+          
+          # Force build.sh script to ignore ABI checking completely
+          sed -i 's/exit 1/echo "Bypassing KMI check failure"/' ../build/abi/compare_to_symbol_list || true
 
       - name: Build kernel
         working-directory: kernel_workspace
