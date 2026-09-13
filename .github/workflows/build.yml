@@ -61,7 +61,7 @@ jobs:
             MANIFEST_REF="common-${VERSION}-lts"
             PIN_REF=""
             PIN_TYPE=""
-          elif [[ "${INPUT}" =~ ^${VERSION}.[0-9]+_r[0-9]+$ ]]; then
+          elif [[ "${INPUT}" =~ ^${VERSION}\.[0-9]+_r[0-9]+$ ]]; then
             MANIFEST_REF="common-${VERSION}"
             PIN_REF="${INPUT}"
             PIN_TYPE="tag"
@@ -130,7 +130,7 @@ jobs:
             echo "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y"
             echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y"
             echo "CONFIG_KSU_SUSFS_SUS_MAP=y"
-            
+
             # --- MIZDRAKE7 NETHUNTER MODULAR WIRELESS CONFIGS ---
             echo "CONFIG_NETDEVICES=y"
             echo "CONFIG_WLAN=y"
@@ -164,7 +164,7 @@ jobs:
             echo "CONFIG_RTL8192CU=m"
             echo "CONFIG_RTL8XXXU=m"
             echo "CONFIG_RTL8XXXU_UNTESTED=y"
-            
+
             echo "CONFIG_WERROR=n"
           } >> gki_defconfig
 
@@ -227,25 +227,66 @@ jobs:
           set -euo pipefail
           curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash
 
-      - name: Disable strict checks and module list validations
+      - name: Disable strict ABI/KMI checks and module list validations
         working-directory: kernel_workspace
         run: |
-          sed -i 's/check_defconfig//' ./common/build.config.gki || true
+          set -euo pipefail
           cd common
-          grep -rl '^KMI_DEFINITION_ERROR=' build.config* 2>/dev/null | xargs -r sed -i 's/^KMI_DEFINITION_ERROR=.*/KMI_DEFINITION_ERROR=0/' || true
-          grep -rl '^MODULES_LIST=' build.config* 2>/dev/null | xargs -r sed -i 's/^MODULES_LIST=.*/MODULES_LIST=/' || true
-          grep -rl '^MODULES_ORDER=' build.config* 2>/dev/null | xargs -r sed -i 's/^MODULES_ORDER=.*/MODULES_ORDER=/' || true
-          grep -rl '^KMI_SYMBOL_LIST=' build.config* 2>/dev/null | xargs -r sed -i 's/^KMI_SYMBOL_LIST=.*/KMI_SYMBOL_LIST=/' || true
-          grep -rl '^TRIM_NONLISTED_KMI=' build.config* 2>/dev/null | xargs -r sed -i 's/^TRIM_NONLISTED_KMI=.*/TRIM_NONLISTED_KMI=0/' || true
+
+          # Neutralize check_defconfig call in build.config.gki (harmless if absent)
+          sed -i 's/check_defconfig//' build.config.gki 2>/dev/null || true
+
+          # Every one of these needs to be forced to "off"/empty, not just
+          # MODULES_LIST/ORDER/KMI_SYMBOL_LIST — the previous run failed
+          # because KMI_SYMBOL_LIST_STRICT_MODE was left enabled with no
+          # KMI_SYMBOL_LIST to satisfy it. Also drop the ABI check and
+          # KMI enforcement, or build.sh dies at olddefconfig/abi steps too.
+          for f in build.config build.config.gki build.config.gki.aarch64 build.config.common build.config.aarch64; do
+            [ -f "$f" ] || continue
+            grep -q '^KMI_SYMBOL_LIST_STRICT_MODE=' "$f" && \
+              sed -i 's/^KMI_SYMBOL_LIST_STRICT_MODE=.*/KMI_SYMBOL_LIST_STRICT_MODE=0/' "$f"
+            grep -q '^KMI_SYMBOL_LIST=' "$f" && \
+              sed -i 's/^KMI_SYMBOL_LIST=.*/KMI_SYMBOL_LIST=/' "$f"
+            grep -q '^ADDITIONAL_KMI_SYMBOL_LISTS=' "$f" && \
+              sed -i 's/^ADDITIONAL_KMI_SYMBOL_LISTS=.*/ADDITIONAL_KMI_SYMBOL_LISTS=/' "$f"
+            grep -q '^TRIM_NONLISTED_KMI=' "$f" && \
+              sed -i 's/^TRIM_NONLISTED_KMI=.*/TRIM_NONLISTED_KMI=0/' "$f"
+            grep -q '^KMI_ENFORCED=' "$f" && \
+              sed -i 's/^KMI_ENFORCED=.*/KMI_ENFORCED=0/' "$f"
+            grep -q '^ABI_DEFINITION=' "$f" && \
+              sed -i 's/^ABI_DEFINITION=.*/ABI_DEFINITION=/' "$f"
+            grep -q '^TIDY_ABI=' "$f" && \
+              sed -i 's/^TIDY_ABI=.*/TIDY_ABI=0/' "$f"
+            grep -q '^MODULES_LIST=' "$f" && \
+              sed -i 's/^MODULES_LIST=.*/MODULES_LIST=/' "$f"
+            grep -q '^MODULES_ORDER=' "$f" && \
+              sed -i 's/^MODULES_ORDER=.*/MODULES_ORDER=/' "$f"
+          done
+
+          echo "---- resulting KMI/ABI-related lines ----"
+          grep -RhnE '^(KMI_SYMBOL_LIST|KMI_SYMBOL_LIST_STRICT_MODE|ADDITIONAL_KMI_SYMBOL_LISTS|TRIM_NONLISTED_KMI|KMI_ENFORCED|ABI_DEFINITION|TIDY_ABI|MODULES_LIST|MODULES_ORDER)=' build.config* || true
 
       - name: Build kernel
         working-directory: kernel_workspace
+        env:
+          # Belt-and-suspenders: build.config.gki does
+          # KMI_SYMBOL_LIST_STRICT_MODE=${KMI_SYMBOL_LIST_STRICT_MODE:-1}
+          # so even if a sed above missed a file, this env var wins because
+          # the default only applies when the var is completely unset.
+          KMI_SYMBOL_LIST_STRICT_MODE: "0"
+          KMI_ENFORCED: "0"
+          TRIM_NONLISTED_KMI: "0"
+          TIDY_ABI: "0"
         run: |
           set -euo pipefail
           LTO=thin \
           BUILD_CONFIG=common/build.config.gki.aarch64 \
           USE_CCACHE=1 \
           CCACHE_DIR="${CCACHE_DIR}" \
+          KMI_SYMBOL_LIST_STRICT_MODE=0 \
+          KMI_ENFORCED=0 \
+          TRIM_NONLISTED_KMI=0 \
+          TIDY_ABI=0 \
           build/build.sh -j"$(nproc)"
 
       - name: Locate built Image and Modules
