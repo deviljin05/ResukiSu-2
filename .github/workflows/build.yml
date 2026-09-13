@@ -471,7 +471,7 @@ jobs:
           chmod +x scripts/setlocalversion.orig
           cat > scripts/setlocalversion << 'EOF'
           #!/bin/sh
-          printf -- '-BLAZE-KSUNv1-STABLE'
+          printf -- '-BLAZE-STABLE-V1'
           EOF
           chmod +x scripts/setlocalversion
 
