@@ -123,7 +123,7 @@ jobs:
           fi
           echo "SUSFS_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
 
-      - name: Set SUSFS, Ptrace, Unicode, eBPF & Core Configs
+      - name: Set SUSFS, Ptrace, Unicode, eBPF & Fixed Core Wireless Configs
         run: |
           cd kernel_workspace/common/arch/arm64/configs
           {
@@ -158,16 +158,31 @@ jobs:
             echo "CONFIG_CGROUP_BPF=y"
             echo "CONFIG_BPF_EVENTS=y"
             
-            # --- WIRELESS RTLXXXU DRIVER CONFIGS ---
+            # --- MISSING WIRELESS DEPENDENCIES & CRYPTO FIXES ---
+            echo "CONFIG_MODULES=y"
+            echo "CONFIG_MODULE_UNLOAD=y"
+            echo "CONFIG_RFKILL=y"
+            echo "CONFIG_RFKILL_LEDS=y"
+            echo "CONFIG_CRYPTO_ARC4=y"
+            echo "CONFIG_CRYPTO_ECB=y"
+            echo "CONFIG_CRYPTO_AES=y"
+            echo "CONFIG_CRYPTO_MICHAEL_MIC=y"
+            echo "CONFIG_CRC_CCITT=y"
+            echo "CONFIG_CRC_ITU_T=y"
+
+            # --- FIXED WIRELESS RTLXXXU DRIVER CONFIGS (LOADED AS MODULES) ---
             echo "CONFIG_CFG80211=y"
             echo "CONFIG_MAC80211=y"
+            echo "CONFIG_MAC80211_HAS_RC=y"
+            echo "CONFIG_MAC80211_RC_MINSTREL=y"
+            echo "CONFIG_MAC80211_RC_DEFAULT_MINSTREL=y"
             echo "CONFIG_NETDEVICES=y"
             echo "CONFIG_WLAN=y"
             echo "CONFIG_WLAN_VENDOR_REALTEK=y"
-            echo "CONFIG_RTL8187=y"
-            echo "CONFIG_RTL_CARDS=y"
-            echo "CONFIG_RTL8192CU=y"
-            echo "CONFIG_RTL8XXXU=y"
+            echo "CONFIG_RTL_CARDS=m"
+            echo "CONFIG_RTL8187=m"
+            echo "CONFIG_RTL8192CU=m"
+            echo "CONFIG_RTL8XXXU=m"
             echo "CONFIG_RTL8XXXU_UNTESTED=y"
             
             echo "CONFIG_WERROR=n"
@@ -506,7 +521,7 @@ jobs:
             grep -q "^${SYM}=y$" "$CFG"
           done
 
-      - name: Locate built Image
+      - name: Locate built Image and Modules
         working-directory: kernel_workspace
         run: |
           set -euo pipefail
@@ -517,11 +532,16 @@ jobs:
           [ -n "$IMG" ]
           echo "IMG_PATH=kernel_workspace/${IMG}" >> "$GITHUB_ENV"
 
-      - name: Package AnyKernel3
+      - name: Package AnyKernel3 with Compiled Driver Modules
         run: |
           set -euo pipefail
           git clone --depth=1 https://github.com/WildKernels/AnyKernel3.git -b gki-2.0 ak3
           cp "${{ env.IMG_PATH }}" ak3/Image
+          
+          # Copy compiled kernel modules (.ko files) into AnyKernel3 modules directory if present
+          mkdir -p ak3/modules/system/lib/modules
+          find kernel_workspace/out -name "*.ko" -exec cp {} ak3/modules/system/lib/modules/ \; || true
+          
           cd ak3
           zip -r9 -q "../${{ github.event.inputs.device_name }}-Blaze-android12-5.10-susfs${SUSFS_COMMIT:0:8}.zip" . -x ".git*"
 
