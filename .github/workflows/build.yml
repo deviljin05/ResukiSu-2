@@ -1,4 +1,4 @@
-name: Build Custom GKI Kernel (ReSukiSU + SUSFS + BBRv3 + Wireless RTL)
+name: Build Custom GKI Kernel (ReSukiSU + SUSFS + BBRv3 + Modular Wireless)
 
 on:
   workflow_dispatch:
@@ -17,10 +17,6 @@ on:
         default: "gki-custom"
       enable_gaming_perf_tune:
         description: "Enable gaming/latency perf tweaks (module force-load, vfs cache pressure, freeze/F2FS-GC/PCI-PME timeouts, cpuidle teo rating) — fail-soft, config/source-level only, no out-of-tree drivers"
-        required: true
-        default: "false"
-      enable_performance_governor:
-        description: "Force CPU default governor to 'performance' instead of stock 'schedutil'. Real tradeoff: noticeably higher battery/heat, not a free win — leave 'false' unless you specifically want it. Off by default."
         required: true
         default: "false"
 
@@ -123,7 +119,7 @@ jobs:
           fi
           echo "SUSFS_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
 
-      - name: Set SUSFS, Ptrace, Unicode, eBPF & Fixed Core Wireless Configs
+      - name: Set SUSFS, Core Security & Fully Modular Wireless Configs
         run: |
           cd kernel_workspace/common/arch/arm64/configs
           {
@@ -139,15 +135,13 @@ jobs:
             echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y"
             echo "CONFIG_KSU_SUSFS_SUS_MAP=y"
             
-            # --- PTRACE FIXES ---
+            # --- PTRACE & UNICODE ---
             echo "CONFIG_HAVE_ARCH_PTRACE=y"
             echo "CONFIG_PTRACE=y"
-            
-            # --- UNICODE / NLS FIXES ---
             echo "CONFIG_NLS_UTF8=y"
             echo "CONFIG_NLS_DEFAULT=\"utf8\""
             
-            # --- FULL eBPF SUPPORT CONFIGS ---
+            # --- eBPF SUPPORT ---
             echo "CONFIG_BPF=y"
             echo "CONFIG_BPF_SYSCALL=y"
             echo "CONFIG_BPF_JIT=y"
@@ -158,26 +152,43 @@ jobs:
             echo "CONFIG_CGROUP_BPF=y"
             echo "CONFIG_BPF_EVENTS=y"
             
-            # --- MISSING WIRELESS DEPENDENCIES & CRYPTO FIXES ---
+            # --- MODULE LOADING SUPPORT ---
             echo "CONFIG_MODULES=y"
             echo "CONFIG_MODULE_UNLOAD=y"
             echo "CONFIG_RFKILL=y"
             echo "CONFIG_RFKILL_LEDS=y"
-            echo "CONFIG_CRYPTO_ARC4=y"
-            echo "CONFIG_CRYPTO_ECB=y"
+            echo "CONFIG_CRYPTO_ARC4=m"
+            echo "CONFIG_CRYPTO_ECB=m"
             echo "CONFIG_CRYPTO_AES=y"
-            echo "CONFIG_CRYPTO_MICHAEL_MIC=y"
-            echo "CONFIG_CRC_CCITT=y"
-            echo "CONFIG_CRC_ITU_T=y"
+            echo "CONFIG_CRYPTO_MICHAEL_MIC=m"
+            echo "CONFIG_CRC_CCITT=m"
+            echo "CONFIG_CRC_ITU_T=m"
 
-            # --- FIXED WIRELESS RTLXXXU DRIVER CONFIGS (LOADED AS MODULES) ---
-            echo "CONFIG_CFG80211=y"
-            echo "CONFIG_MAC80211=y"
+            # --- NET HUNTER MODULAR WIRELESS (ALL "=m" PREVENTS BOOTLOOP) ---
+            echo "CONFIG_NETDEVICES=y"
+            echo "CONFIG_WLAN=y"
+            echo "CONFIG_WIRELESS=y"
+            echo "CONFIG_CFG80211=m"
+            echo "CONFIG_MAC80211=m"
             echo "CONFIG_MAC80211_HAS_RC=y"
             echo "CONFIG_MAC80211_RC_MINSTREL=y"
             echo "CONFIG_MAC80211_RC_DEFAULT_MINSTREL=y"
-            echo "CONFIG_NETDEVICES=y"
-            echo "CONFIG_WLAN=y"
+
+            # Atheros
+            echo "CONFIG_ATH_CARDS=m"
+            echo "CONFIG_ATH9K_HW=m"
+            echo "CONFIG_ATH9K_COMMON=m"
+            echo "CONFIG_ATH9K_HTC=m"
+            echo "CONFIG_CARL9170=m"
+
+            # Ralink / MediaTek
+            echo "CONFIG_RT2X00=m"
+            echo "CONFIG_RT2800USB=m"
+            echo "CONFIG_RT2X00_LIB=m"
+            echo "CONFIG_RT2X00_LIB_USB=m"
+            echo "CONFIG_MT7601U=m"
+
+            # Realtek
             echo "CONFIG_WLAN_VENDOR_REALTEK=y"
             echo "CONFIG_RTL_CARDS=m"
             echo "CONFIG_RTL8187=m"
@@ -282,202 +293,6 @@ jobs:
             echo "CONFIG_NET_SCH_CAKE=y"
           } >> gki_defconfig
 
-      - name: Apply NTSync patches
-        working-directory: kernel_workspace/common
-        run: |
-          set -euo pipefail
-          if [ "${SUBLEVEL}" -le "208" ]; then
-            curl -fsSL -o /tmp/0003-lockdep-assert-none-held.patch \
-              https://raw.githubusercontent.com/WildKernels/GKI_KernelSU_SUSFS/main/.github/actions/ntsync/patches/0003-lockdep-assert-none-held.patch
-            patch -p1 -N < /tmp/0003-lockdep-assert-none-held.patch || true
-          fi
-          curl -fsSL -o /tmp/ntsync_compat_android12-5.10.patch \
-            https://raw.githubusercontent.com/WildKernels/kernel_patches/main/common/ntsync/ntsync_compat_android12-5.10.patch
-          patch -p1 < /tmp/ntsync_compat_android12-5.10.patch || true
-          curl -fsSL -o /tmp/ntsync_base.patch \
-            https://raw.githubusercontent.com/WildKernels/kernel_patches/main/common/ntsync/ntsync_base.patch
-          patch -p1 < /tmp/ntsync_base.patch || true
-          echo "CONFIG_NTSYNC=y" >> arch/arm64/configs/gki_defconfig
-
-      - name: Apply Droidspaces kABI-safe patches
-        working-directory: kernel_workspace/common
-        run: |
-          set -euo pipefail
-          DROIDSPACES_KABI_OK="true"
-          curl -fsSL -o /tmp/droidspaces_sysvipc_kabi.patch \
-            https://raw.githubusercontent.com/ravindu644/Droidspaces-OSS/main/Documentation/resources/kernel-patches/GKI/below-kernel-6.12/001.GKI-below-6.12-fix_sysvipc_kabi_6_7_8.patch
-          if ! patch -p1 < /tmp/droidspaces_sysvipc_kabi.patch; then
-            DROIDSPACES_KABI_OK="false"
-          fi
-          curl -fsSL -o /tmp/droidspaces_posix_mqueue_kabi.patch \
-            https://raw.githubusercontent.com/ravindu644/Droidspaces-OSS/main/Documentation/resources/kernel-patches/GKI/below-kernel-6.12/002.5.10_or_lower_use_android_abi_padding_for_posix_mqueue.patch
-          if ! patch -p1 < /tmp/droidspaces_posix_mqueue_kabi.patch; then
-            DROIDSPACES_KABI_OK="false"
-          fi
-          echo "DROIDSPACES_KABI_OK=${DROIDSPACES_KABI_OK}" >> "$GITHUB_ENV"
-
-      - name: Set Droidspaces configs
-        run: |
-          cd kernel_workspace/common/arch/arm64/configs
-          if [ "${DROIDSPACES_KABI_OK}" = "true" ]; then
-            {
-              echo "CONFIG_SYSVIPC=y"
-              echo "CONFIG_SYSVIPC_SYSCTL=y"
-              echo "CONFIG_POSIX_MQUEUE=y"
-              echo "CONFIG_POSIX_MQUEUE_SYSCTL=y"
-              echo "CONFIG_IPC_NS=y"
-            } >> gki_defconfig
-          fi
-          {
-            echo "CONFIG_NAMESPACES=y"
-            echo "CONFIG_NET_NS=y"
-            echo "CONFIG_CGROUPS=y"
-            echo "CONFIG_PID_NS=y"
-            echo "CONFIG_USER_NS=y"
-            echo "CONFIG_DEVTMPFS=y"
-            echo "CONFIG_NETFILTER_XT_MATCH_ADDRTYPE=y"
-            echo "CONFIG_NETFILTER_XT_TARGET_REJECT=y"
-            echo "CONFIG_NETFILTER_XT_TARGET_LOG=y"
-            echo "CONFIG_NETFILTER_XT_MATCH_RECENT=y"
-            echo "CONFIG_IP_SET=y"
-            echo "CONFIG_IP_SET_HASH_IP=y"
-            echo "CONFIG_IP_SET_HASH_NET=y"
-            echo "CONFIG_NETFILTER_XT_SET=y"
-            echo "CONFIG_TMPFS_POSIX_ACL=y"
-            echo "CONFIG_TMPFS_XATTR=y"
-          } >> gki_defconfig
-
-      - name: Apply gaming/latency perf tuning
-        if: ${{ github.event.inputs.enable_gaming_perf_tune == 'true' }}
-        working-directory: kernel_workspace/common
-        run: |
-          set -euo pipefail
-          patch_default() {
-            local label="$1" old_re="$2" new="$3"; shift 3
-            local files=("$@")
-            local d='/'
-            for f in "${files[@]}"; do
-              [ -f "$f" ] || continue
-              if grep -qE -- "$old_re" "$f"; then
-                if sed -i -E "s${d}${old_re}${d}${new}${d}" "$f"; then
-                  echo "  [ok] ${label} (in $f)"
-                  return 0
-                else
-                  echo "::warning::gaming-perf-tune: '${label}' matched in $f but sed edit failed, skipped"
-                  return 1
-                fi
-              fi
-            done
-            echo "::warning::gaming-perf-tune: '${label}' pattern not found, skipped (kernel version drift)"
-            return 1
-          }
-
-          echo "Kconfig: allow force-loading mismatched vendor modules"
-          echo "CONFIG_MODULE_FORCE_LOAD=y" >> arch/arm64/configs/gki_defconfig
-
-          echo "Reducing VFS cache pressure default (fs/dcache.c)"
-          patch_default "vfs_cache_pressure default 100->50" \
-            'int[[:space:]]+sysctl_vfs_cache_pressure[[:space:]]+__read_mostly[[:space:]]*=[[:space:]]*100;' \
-            'int sysctl_vfs_cache_pressure __read_mostly = 50;' \
-            fs/dcache.c || true
-
-          echo "Reducing freeze timeout (kernel/power/process.c, 20s->1s)"
-          patch_default "freeze_timeout_msecs 20000->1000" \
-            'freeze_timeout_msecs[[:space:]]*=[[:space:]]*20[[:space:]]*\*[[:space:]]*MSEC_PER_SEC;' \
-            'freeze_timeout_msecs = 1 * MSEC_PER_SEC;' \
-            kernel/power/process.c kernel/power/main.c kernel/power/suspend.c || true
-
-          echo "Reducing F2FS urgent GC sleep time (fs/f2fs/gc.h, 500ms->50ms)"
-          patch_default "F2FS urgent GC sleep 500->50" \
-            '#define[[:space:]]+DEF_GC_THREAD_URGENT_SLEEP_TIME[[:space:]]+500' \
-            '#define DEF_GC_THREAD_URGENT_SLEEP_TIME\t50' \
-            fs/f2fs/gc.h fs/f2fs/f2fs.h || true
-
-          echo "Increasing PCI PME poll timeout (drivers/pci/pci.c, 1s->4s)"
-          patch_default "PME_TIMEOUT 1000->4000" \
-            '#define[[:space:]]+PME_TIMEOUT[[:space:]]+1000' \
-            '#define PME_TIMEOUT\t4000' \
-            drivers/pci/pci.c || true
-
-          echo "Raising cpuidle teo governor default rating"
-          patch_default "teo governor rating 19->25" \
-            '\.rating[[:space:]]*=[[:space:]]*19,' \
-            '.rating =\t25,' \
-            drivers/cpuidle/governors/teo.c || true
-
-          echo "Raising ext4 default journal commit interval (5s->30s)"
-          patch_default "ext4/jbd2 commit interval 5s->30s" \
-            '#define[[:space:]]+JBD2_DEFAULT_MAX_COMMIT_AGE[[:space:]]+5' \
-            '#define JBD2_DEFAULT_MAX_COMMIT_AGE\t30' \
-            include/linux/jbd2.h fs/jbd2/journal.c || true
-
-          echo "Lowering vm_swappiness default (60->30) for less aggressive swapping"
-          patch_default "vm_swappiness 60->30" \
-            'int[[:space:]]+vm_swappiness[[:space:]]*=[[:space:]]*60;' \
-            'int vm_swappiness = 30;' \
-            mm/vmscan.c || true
-
-          echo "Reducing CFS scheduler latency (6ms->4ms) for snappier task switching"
-          patch_default "sysctl_sched_latency 6000000->4000000" \
-            'unsigned[[:space:]]+int[[:space:]]+sysctl_sched_latency[[:space:]]*=[[:space:]]*6000000ULL;' \
-            'unsigned int sysctl_sched_latency = 4000000ULL;' \
-            kernel/sched/fair.c || true
-
-          echo "Reducing CFS min granularity (0.75ms->0.5ms)"
-          patch_default "sysctl_sched_min_granularity 750000->500000" \
-            'unsigned[[:space:]]+int[[:space:]]+sysctl_sched_min_granularity[[:space:]]*=[[:space:]]*750000ULL;' \
-            'unsigned int sysctl_sched_min_granularity = 500000ULL;' \
-            kernel/sched/fair.c || true
-
-          echo "Reducing CFS wakeup granularity (1ms->0.5ms) for faster preemption on wake"
-          patch_default "sysctl_sched_wakeup_granularity 1000000->500000" \
-            'unsigned[[:space:]]+int[[:space:]]+sysctl_sched_wakeup_granularity[[:space:]]*=[[:space:]]*1000000UL;' \
-            'unsigned int sysctl_sched_wakeup_granularity = 500000UL;' \
-            kernel/sched/fair.c || true
-
-          echo "Reducing task migration cost (0.5ms->0.25ms) for faster load balancing across cores"
-          patch_default "sysctl_sched_migration_cost 500000->250000" \
-            'const_debug[[:space:]]+unsigned[[:space:]]+int[[:space:]]+sysctl_sched_migration_cost[[:space:]]*=[[:space:]]*500000UL;' \
-            'const_debug unsigned int sysctl_sched_migration_cost = 250000UL;' \
-            kernel/sched/fair.c || true
-
-          echo "Raising vm.max_map_count default (65530->1048576) for mmap-heavy games/emulators"
-          patch_default "DEFAULT_MAX_MAP_COUNT (USHRT_MAX-5)->1048576" \
-            '#define[[:space:]]+DEFAULT_MAX_MAP_COUNT[[:space:]]*\([[:space:]]*USHRT_MAX[[:space:]]*-[[:space:]]*MAPCOUNT_ELF_CORE_MARGIN[[:space:]]*\)' \
-            '#define DEFAULT_MAX_MAP_COUNT (1048576)' \
-            include/linux/mm.h || true
-
-          echo "Lowering dirty_background_ratio (10->5) to complement dirty_ratio tweak"
-          patch_default "dirty_background_ratio 10->5" \
-            'int[[:space:]]+dirty_background_ratio[[:space:]]*=[[:space:]]*10;' \
-            'int dirty_background_ratio = 5;' \
-            mm/page-writeback.c || true
-
-          echo "Reducing dirty page expire interval (30s->10s) to avoid large writeback stalls"
-          patch_default "dirty_expire_interval 3000->1000 (centisecs)" \
-            'unsigned[[:space:]]+int[[:space:]]+dirty_expire_interval[[:space:]]*=[[:space:]]*30[[:space:]]*\*[[:space:]]*100;' \
-            'unsigned int dirty_expire_interval = 10 * 100;' \
-            mm/page-writeback.c || true
-
-          echo "Raising min_free_kbytes floor slightly for smoother allocs under memory pressure"
-          patch_default "min_free_kbytes floor 128->256 (in pages, KB)" \
-            'int[[:space:]]+min_free_kbytes[[:space:]]*=[[:space:]]*1024;' \
-            'int min_free_kbytes = 2048;' \
-            mm/page_alloc.c || true
-
-          echo "Lowering dirty_ratio default for snappier writeback under load"
-          patch_default "vm dirty_ratio 20->10" \
-            'int[[:space:]]+vm_dirty_ratio[[:space:]]*=[[:space:]]*20;' \
-            'int vm_dirty_ratio = 10;' \
-            mm/page-writeback.c || true
-
-          echo "Enabling 1000Hz kernel tick (lower scheduling latency)"
-          echo "CONFIG_HZ_1000=y" >> arch/arm64/configs/gki_defconfig
-
-          echo "Enabling Kyber/Deadline I/O schedulers"
-          echo "CONFIG_MQ_IOSCHED_KYBER=y" >> arch/arm64/configs/gki_defconfig
-          echo "CONFIG_MQ_IOSCHED_DEADLINE=y" >> arch/arm64/configs/gki_defconfig
-
       - name: Apply custom kernel branding
         working-directory: kernel_workspace/common
         run: |
@@ -498,13 +313,10 @@ jobs:
         working-directory: kernel_workspace/common
         run: |
           set -euo pipefail
-          # Disable ABI symbol list comparison & KMI errors
           grep -rl '^KMI_DEFINITION_ERROR=' build.config* 2>/dev/null | xargs -r sed -i 's/^KMI_DEFINITION_ERROR=.*/KMI_DEFINITION_ERROR=0/' || true
           grep -rl '^CHECK_DEFCONFIG=' build.config* 2>/dev/null | xargs -r sed -i 's/^CHECK_DEFCONFIG=.*/CHECK_DEFCONFIG=/' || true
           grep -rl '^MODULES_ORDER=' build.config* 2>/dev/null | xargs -r sed -i 's/^MODULES_ORDER=.*/MODULES_ORDER=/' || true
           grep -rl '^MODULES_LIST=' build.config* 2>/dev/null | xargs -r sed -i 's/^MODULES_LIST=.*/MODULES_LIST=/' || true
-          
-          # Force build.sh script to ignore ABI checking completely
           sed -i 's/exit 1/echo "Bypassing KMI check failure"/' ../build/abi/compare_to_symbol_list || true
 
       - name: Build kernel
@@ -517,17 +329,7 @@ jobs:
           CCACHE_DIR="${CCACHE_DIR}" \
           build/build.sh -j"$(nproc)"
 
-      - name: Verify final configs
-        working-directory: kernel_workspace
-        run: |
-          set -euo pipefail
-          CFG=$(find out -name ".config" | head -n1)
-          [ -n "$CFG" ]
-          for SYM in CONFIG_NAMESPACES CONFIG_NET_NS CONFIG_PID_NS CONFIG_CGROUPS CONFIG_USER_NS CONFIG_BPF_SYSCALL; do
-            grep -q "^${SYM}=y$" "$CFG"
-          done
-
-      - name: Locate built Image and Modules
+      - name: Locate built Image
         working-directory: kernel_workspace
         run: |
           set -euo pipefail
@@ -538,18 +340,83 @@ jobs:
           [ -n "$IMG" ]
           echo "IMG_PATH=kernel_workspace/${IMG}" >> "$GITHUB_ENV"
 
-      - name: Package AnyKernel3 with Compiled Driver Modules
+      - name: Package Clean AnyKernel3 Kernel Zip
         run: |
           set -euo pipefail
           git clone --depth=1 https://github.com/WildKernels/AnyKernel3.git -b gki-2.0 ak3
           cp "${{ env.IMG_PATH }}" ak3/Image
-          
-          # Copy compiled kernel modules (.ko files) into AnyKernel3 modules directory if present
-          mkdir -p ak3/modules/system/lib/modules
-          find kernel_workspace/out -name "*.ko" -exec cp {} ak3/modules/system/lib/modules/ \; || true
-          
           cd ak3
           zip -r9 -q "../${{ github.event.inputs.device_name }}-Blaze-android12-5.10-susfs${SUSFS_COMMIT:0:8}.zip" . -x ".git*"
+
+      - name: Generate Wireless Firmware KSU/Magisk Module
+        run: |
+          set -euo pipefail
+          mkdir -p wireless_module/system/lib/modules
+          mkdir -p wireless_module/META-INF/com/google/android
+
+          # Copy compiled kernel modules (.ko)
+          find kernel_workspace/out -name "*.ko" -exec cp {} wireless_module/system/lib/modules/ \; || true
+
+          # Create module.prop
+          cat << 'EOF' > wireless_module/module.prop
+          id=Wireless-firmware
+          name=Wireless NetHunter Drivers & Firmware
+          version=v1.0
+          versionCode=1
+          author=mizdrake7_style
+          description=Modular loader for external USB Wi-Fi dongles (Atheros, Ralink, Realtek)
+          EOF
+
+          # Create service.sh (delayed loader)
+          cat << 'EOF' > wireless_module/service.sh
+          #!/system/bin/sh
+          sleep 25
+          LOG=/data/local/tmp/nethunter_wireless.log
+          MODDIR=/data/adb/modules/Wireless-firmware/system/lib/modules
+
+          echo "===== $(date) =====" >> $LOG
+          echo /system/etc/firmware > /sys/module/firmware_class/parameters/path 2>>$LOG
+
+          load(){
+            MOD="$1"
+            if [ -f "$MODDIR/$MOD.ko" ]; then
+              echo "Loading $MOD" >> $LOG
+              insmod "$MODDIR/$MOD.ko" >>$LOG 2>&1
+            else
+              echo "$MOD missing" >> $LOG
+            fi
+          }
+
+          load cfg80211
+          load mac80211
+          load ath
+          load ath9k_hw
+          load ath9k_common
+          load ath9k_htc
+          load carl9170
+          load rt2x00lib
+          load rt2x00usb
+          load rt2800lib
+          load rt2800usb
+          load mt7601u
+          load rtl8187
+          load rtl8xxxu
+
+          dmesg | grep -i -E "firmware|cfg80211|mac80211|ath|rt2x00|rtl" >> $LOG 2>&1
+          echo "Wireless modules load sequence completed." >> $LOG
+          EOF
+
+          chmod +x wireless_module/service.sh
+
+          # Create dummy updater-script for Magisk / KernelSU installer
+          echo "update-binary" > wireless_module/META-INF/com/google/android/update-binary
+          cat << 'EOF' > wireless_module/META-INF/com/google/android/update-binary
+          #!/sbin/sh
+          echo "Installing Wireless Firmware Module..."
+          EOF
+
+          cd wireless_module
+          zip -r9 -q "../Wireless-Firmware-KSU-Module.zip" .
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
