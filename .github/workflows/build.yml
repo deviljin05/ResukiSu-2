@@ -1,24 +1,20 @@
-name: Build Custom GKI Kernel (ReSukiSU + SUSFS + BBRv3 + Modular Wireless)
+name: Build Custom GKI Kernel (ReSukiSU + SUSFS + BBRv3 + Mizdrake7 Wireless)
 
 on:
   workflow_dispatch:
     inputs:
       os_patch_level:
-        description: "'lts' = rolling LTS branch. A dated maintenance branch (e.g. android12-5.10-2026-07) tracks Google's latest upstream merges/ASB patches. Or pin an exact GKI release tag, e.g. android12-5.10.264_r00"
+        description: "'lts' = rolling LTS branch or pin an exact GKI release tag"
         required: true
         default: "android12-5.10.264_r00"
       susfs_commit:
-        description: "SUSFS commit hash (leave empty = latest on gki-android12-5.10 branch)"
+        description: "SUSFS commit hash (leave empty = latest)"
         required: false
         default: ""
       device_name:
         description: "Optional label for artifact naming"
         required: false
         default: "gki-custom"
-      enable_gaming_perf_tune:
-        description: "Enable gaming/latency perf tweaks (module force-load, vfs cache pressure, freeze/F2FS-GC/PCI-PME timeouts, cpuidle teo rating) — fail-soft, config/source-level only, no out-of-tree drivers"
-        required: true
-        default: "false"
 
 env:
   VERSION: android12-5.10
@@ -86,7 +82,7 @@ jobs:
           repo init -u https://android.googlesource.com/kernel/manifest -b "${MANIFEST_REF}" --depth=1
           repo sync -c --current-branch --no-clone-bundle --no-tags -j"$(nproc)"
 
-      - name: Pin kernel/common to exact tag or dated maintenance branch
+      - name: Pin kernel/common to exact tag or branch
         if: ${{ env.PIN_TYPE != '' }}
         working-directory: kernel_workspace/common
         run: |
@@ -119,7 +115,7 @@ jobs:
           fi
           echo "SUSFS_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
 
-      - name: Set SUSFS, Core Security & Fully Modular Wireless Configs
+      - name: Set Mizdrake7 Style Defconfig (SUSFS + Modular Wireless)
         run: |
           cd kernel_workspace/common/arch/arm64/configs
           {
@@ -135,40 +131,12 @@ jobs:
             echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y"
             echo "CONFIG_KSU_SUSFS_SUS_MAP=y"
             
-            # --- PTRACE & UNICODE ---
-            echo "CONFIG_HAVE_ARCH_PTRACE=y"
-            echo "CONFIG_PTRACE=y"
-            echo "CONFIG_NLS_UTF8=y"
-            echo "CONFIG_NLS_DEFAULT=\"utf8\""
-            
-            # --- eBPF SUPPORT ---
-            echo "CONFIG_BPF=y"
-            echo "CONFIG_BPF_SYSCALL=y"
-            echo "CONFIG_BPF_JIT=y"
-            echo "CONFIG_BPF_JIT_ALWAYS_ON=y"
-            echo "CONFIG_NET_CLS_ACT=y"
-            echo "CONFIG_NET_ACT_BPF=y"
-            echo "CONFIG_NET_CLS_BPF=y"
-            echo "CONFIG_CGROUP_BPF=y"
-            echo "CONFIG_BPF_EVENTS=y"
-            
-            # --- MODULE LOADING SUPPORT ---
-            echo "CONFIG_MODULES=y"
-            echo "CONFIG_MODULE_UNLOAD=y"
-            echo "CONFIG_RFKILL=y"
-            echo "CONFIG_RFKILL_LEDS=y"
-            echo "CONFIG_CRYPTO_ARC4=m"
-            echo "CONFIG_CRYPTO_ECB=m"
-            echo "CONFIG_CRYPTO_AES=y"
-            echo "CONFIG_CRYPTO_MICHAEL_MIC=m"
-            echo "CONFIG_CRC_CCITT=m"
-            echo "CONFIG_CRC_ITU_T=m"
-
-            # --- NET HUNTER MODULAR WIRELESS ---
+            # --- MIZDRAKE7 NETHUNTER MODULAR WIRELESS CONFIGS ---
             echo "CONFIG_NETDEVICES=y"
             echo "CONFIG_WLAN=y"
             echo "CONFIG_WIRELESS=y"
             echo "CONFIG_CFG80211=m"
+            echo "CONFIG_CFG80211_INTERNAL_REGDB=y"
             echo "CONFIG_MAC80211=m"
             echo "CONFIG_MAC80211_HAS_RC=y"
             echo "CONFIG_MAC80211_RC_MINSTREL=y"
@@ -176,6 +144,7 @@ jobs:
 
             # Atheros
             echo "CONFIG_ATH_CARDS=m"
+            echo "CONFIG_ATH9K=m"
             echo "CONFIG_ATH9K_HW=m"
             echo "CONFIG_ATH9K_COMMON=m"
             echo "CONFIG_ATH9K_HTC=m"
@@ -258,66 +227,12 @@ jobs:
           set -euo pipefail
           curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash
 
-      - name: Apply BBRv3 backport
-        working-directory: kernel_workspace/common
-        run: |
-          set -euo pipefail
-          git clone --depth=1 https://github.com/WildKernels/kernel_patches.git /tmp/wildpatches
-          BBRV3_PATCH="/tmp/wildpatches/common/bbrv3/0001-net-tcp-backport-BBRv3-to-android12-5.10.patch"
-          BBR_CONG_NAME="bbr"
-          BBRV3_PATCH_APPLIED="false"
-          if [ -f "$BBRV3_PATCH" ] && patch -p1 < "$BBRV3_PATCH"; then
-            BBRV3_PATCH_APPLIED="true"
-            DETECTED="$(grep -rhoE '\.name\s*=\s*"[a-zA-Z0-9_]+"' net/ipv4/tcp_bbr*.c 2>/dev/null | grep -oE '"[a-zA-Z0-9_]+"' | tr -d '"' | head -n1 || true)"
-            [ -n "$DETECTED" ] && BBR_CONG_NAME="$DETECTED"
-          fi
-          echo "BBR_CONG_NAME=${BBR_CONG_NAME}" >> "$GITHUB_ENV"
-          echo "BBRV3_PATCH_APPLIED=${BBRV3_PATCH_APPLIED}" >> "$GITHUB_ENV"
-
-      - name: Set networking / TCP congestion configs
-        run: |
-          cd kernel_workspace/common/arch/arm64/configs
-          {
-            echo "CONFIG_TCP_CONG_ADVANCED=y"
-            echo "CONFIG_TCP_CONG_BBR=y"
-            echo "CONFIG_TCP_CONG_CUBIC=y"
-            echo "CONFIG_TCP_CONG_BIC=y"
-            echo "CONFIG_TCP_CONG_WESTWOOD=y"
-            echo "CONFIG_TCP_CONG_HTCP=y"
-            if [ "${BBRV3_PATCH_APPLIED}" = "true" ]; then
-              echo "CONFIG_TCP_CONG_BBR3=y"
-            fi
-            echo "CONFIG_DEFAULT_TCP_CONG=${BBR_CONG_NAME}"
-            echo "CONFIG_NET_SCH_FQ=y"
-            echo "CONFIG_NET_SCH_FQ_CODEL=y"
-            echo "CONFIG_NET_SCH_CAKE=y"
-          } >> gki_defconfig
-
-      - name: Apply custom kernel branding
-        working-directory: kernel_workspace/common
-        run: |
-          set -euo pipefail
-          mv scripts/setlocalversion scripts/setlocalversion.orig
-          chmod +x scripts/setlocalversion.orig
-          cat > scripts/setlocalversion << 'EOF'
-          #!/bin/sh
-          printf -- '-BLAZE-STABLE-V1'
-          EOF
-          chmod +x scripts/setlocalversion
-
-      - name: Disable strict defconfig verification
+      - name: Disable strict defconfig & KMI checks
         working-directory: kernel_workspace
-        run: sed -i 's/check_defconfig//' ./common/build.config.gki
-
-      - name: Disable strict GKI modules and KMI symbol verification
-        working-directory: kernel_workspace/common
         run: |
-          set -euo pipefail
+          sed -i 's/check_defconfig//' ./common/build.config.gki
+          cd common
           grep -rl '^KMI_DEFINITION_ERROR=' build.config* 2>/dev/null | xargs -r sed -i 's/^KMI_DEFINITION_ERROR=.*/KMI_DEFINITION_ERROR=0/' || true
-          grep -rl '^CHECK_DEFCONFIG=' build.config* 2>/dev/null | xargs -r sed -i 's/^CHECK_DEFCONFIG=.*/CHECK_DEFCONFIG=/' || true
-          grep -rl '^MODULES_ORDER=' build.config* 2>/dev/null | xargs -r sed -i 's/^MODULES_ORDER=.*/MODULES_ORDER=/' || true
-          grep -rl '^MODULES_LIST=' build.config* 2>/dev/null | xargs -r sed -i 's/^MODULES_LIST=.*/MODULES_LIST=/' || true
-          sed -i 's/exit 1/echo "Bypassing KMI check failure"/' ../build/abi/compare_to_symbol_list || true
 
       - name: Build kernel
         working-directory: kernel_workspace
@@ -334,13 +249,8 @@ jobs:
         run: |
           set -euo pipefail
           IMG=$(find out -path "*dist/Image" | head -n1)
-          if [ -z "$IMG" ]; then
-            IMG=$(find out -name "Image" | head -n1)
-          fi
           [ -n "$IMG" ]
           echo "IMG_PATH=kernel_workspace/${IMG}" >> "$GITHUB_ENV"
-          
-          # Find where modules are archived or staged in out/
           DIST_DIR=$(dirname "${IMG}")
           echo "DIST_DIR=kernel_workspace/${DIST_DIR}" >> "$GITHUB_ENV"
 
@@ -350,103 +260,90 @@ jobs:
           git clone --depth=1 https://github.com/WildKernels/AnyKernel3.git -b gki-2.0 ak3
           cp "${{ env.IMG_PATH }}" ak3/Image
           cd ak3
-          zip -r9 -q "../${{ github.event.inputs.device_name }}-Blaze-android12-5.10-susfs${SUSFS_COMMIT:0:8}.zip" . -x ".git*"
+          zip -r9 -q "../${{ github.event.inputs.device_name }}-Blaze-android12-5.10.zip" . -x ".git*"
 
-      - name: Generate Wireless Firmware KSU/Magisk Module
+      - name: Generate Mizdrake7 Style Wireless Magisk Module
         run: |
           set -euo pipefail
           mkdir -p wireless_module/system/lib/modules
           mkdir -p wireless_module/META-INF/com/google/android
 
-          # Correctly extract modules from the GKI distribution archive or out path
           if [ -f "${{ env.DIST_DIR }}/kernel_modules.tar.gz" ]; then
             tar -xzf "${{ env.DIST_DIR }}/kernel_modules.tar.gz" -C wireless_module/system/lib/modules
           else
             find kernel_workspace/out -name "*.ko" -exec cp {} wireless_module/system/lib/modules/ \; || true
           fi
 
-          # Create module.prop
           cat << 'EOF' > wireless_module/module.prop
           id=Wireless-firmware
           name=Wireless NetHunter Drivers & Firmware
-          version=v1.0
-          versionCode=1
-          author=mizdrake7_style
-          description=Modular loader for external USB Wi-Fi dongles (Atheros, Ralink, Realtek)
+          version=v3
+          versionCode=3
+          author=mizdrake7
+          description=NetHunter Wireless Drivers packaged like mizdrake7 style
           EOF
 
-          # Create service.sh (delayed loader)
+          # Exact Mizdrake7 service.sh script matching reference repository
           cat << 'EOF' > wireless_module/service.sh
-          #!/system/bin/sh
+          #!/bin/sh
           sleep 25
           LOG=/data/local/tmp/nethunter_wireless.log
           MODDIR=/data/adb/modules/Wireless-firmware/system/lib/modules
 
           echo "===== $(date) =====" >> $LOG
+
           echo /system/etc/firmware > /sys/module/firmware_class/parameters/path 2>>$LOG
 
           load(){
-            MOD="$1"
-            if [ -f "$MODDIR/$MOD.ko" ]; then
-              echo "Loading $MOD" >> $LOG
-              insmod "$MODDIR/$MOD.ko" >>$LOG 2>&1
-            else
-              echo "$MOD missing" >> $LOG
-            fi
+           MOD="$1"
+           if [ -f "$MODDIR/$MOD.ko" ]; then
+             echo "Loading $MOD" >> $LOG
+             insmod "$MODDIR/$MOD.ko" >>$LOG 2>&1
+           else
+             echo "$MOD missing" >> $LOG
+           fi
           }
 
           load cfg80211
           load mac80211
+
           load ath
+
           load ath9k_hw
           load ath9k_common
           load ath9k_htc
-          load carl9170
+
           load rt2x00lib
           load rt2x00usb
           load rt2800lib
           load rt2800usb
-          load mt7601u
+
           load rtl8187
-          load rtl8xxxu
 
-          dmesg | grep -i -E "firmware|cfg80211|mac80211|ath|rt2x00|rtl" >> $LOG 2>&1
-          echo "Wireless modules load sequence completed." >> $LOG
+          rmmod mt7601u 2>/dev/null
+          load mt7601u
+
+          dmesg | grep -i -E "mt7601|firmware|cfg80211|mac80211|ath|ath9k|rt2x00|rt2800|rtl8187" >> $LOG 2>&1
+
+          echo "Wireless modules finished" >> $LOG
           EOF
-
           chmod +x wireless_module/service.sh
-
-          # Create proper Magisk update-binary / updater-script structure
-          cat << 'EOF' > wireless_module/META-INF/com/google/android/updater-script
-          #
-          ui_print("*************************************************");
-          ui_print("      Wireless NetHunter Drivers & Firmware      ");
-          ui_print("*************************************************");
-          set_perm_recursive(0, 0, 0755, 0644, 0322, 0755);
-          EOF
-
-          curl -sSL "https://raw.githubusercontent.com/topjohnwu/Magisk/master/scripts/util_functions.sh" -o wireless_module/META-INF/com/google/android/util_functions.sh || true
 
           cat << 'EOF' > wireless_module/META-INF/com/google/android/update-binary
           #!/sbin/sh
           OUTFD=$2
           ZIPFILE=$3
           mount /data 2>/dev/null
-          unzip -o "$ZIPFILE" 'common/*' -d /tmp 2>/dev/null
-          ui_print "Installing Wireless Firmware Module..."
-          mkdir -p /data/adb/modules/Wireless-firmware
-          cp -rf system /data/adb/modules/Wireless-firmware/
+          unzip -o "$ZIPFILE" 'system/*' -d /data/adb/modules/Wireless-firmware/ 2>/dev/null
           cp -rf service.sh /data/adb/modules/Wireless-firmware/
           cp -rf module.prop /data/adb/modules/Wireless-firmware/
           touch /data/adb/modules/Wireless-firmware/update
-          ui_print "Installation complete!"
           exit 0
           EOF
-
           chmod +x wireless_module/META-INF/com/google/android/update-binary
 
           cd wireless_module
-          zip -r9 -q "../Wireless-Firmware-KSU-Module.zip" .
+          zip -r9 -q "../Wireless_Nethunter_Firmware_v3.zip" .
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
