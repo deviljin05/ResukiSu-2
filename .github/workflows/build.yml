@@ -1,4 +1,4 @@
-name: Build Custom GKI Kernel (ReSukiSU + SUSFS + BBRv3)
+name: Build Custom GKI Kernel (ReSukiSU + SUSFS + BBRv3 + Neutron Clang)
 
 on:
   workflow_dispatch:
@@ -47,7 +47,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y git curl bc bison flex libssl-dev \
             build-essential python3 python3-pip libncurses-dev \
-            ccache zip unzip device-tree-compiler
+            ccache zip unzip device-tree-compiler libelf-dev
 
       - name: Install repo tool
         run: |
@@ -60,6 +60,17 @@ jobs:
 
       - name: Set up ccache
         run: mkdir -p "${CCACHE_DIR}"
+
+      - name: Download & Setup Neutron Clang
+        run: |
+          set -euo pipefail
+          mkdir -p ${GITHUB_WORKSPACE}/neutron-clang
+          cd ${GITHUB_WORKSPACE}/neutron-clang
+          curl -LO https://github.com/Neutron-Toolchains/antman/raw/main/antman
+          chmod +x antman
+          ./antman -S
+          ./antman --patch=glibc
+          echo "${GITHUB_WORKSPACE}/neutron-clang/bin" >> "$GITHUB_PATH"
 
       - name: Resolve manifest branch and optional pinned release tag
         run: |
@@ -89,6 +100,12 @@ jobs:
           cd kernel_workspace
           repo init -u https://android.googlesource.com/kernel/manifest -b "${MANIFEST_REF}" --depth=1
           repo sync -c --current-branch --no-clone-bundle --no-tags -j"$(nproc)"
+
+      - name: Purge Stock Clang Prebuilts
+        working-directory: kernel_workspace
+        run: |
+          set -euo pipefail
+          rm -rf prebuilts/clang/host/linux-x86/* || true
 
       - name: Pin kernel/common to exact tag or dated maintenance branch
         if: ${{ env.PIN_TYPE != '' }}
@@ -123,7 +140,7 @@ jobs:
           fi
           echo "SUSFS_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
 
-      - name: Set SUSFS & Essential Core Configs
+      - name: Set SUSFS, Ptrace, Unicode, eBPF & Core Configs
         run: |
           cd kernel_workspace/common/arch/arm64/configs
           {
@@ -141,6 +158,11 @@ jobs:
             
             # --- PTRACE FIXES ---
             echo "CONFIG_HAVE_ARCH_PTRACE=y"
+            echo "CONFIG_PTRACE=y"
+            
+            # --- UNICODE / NLS FIXES ---
+            echo "CONFIG_NLS_UTF8=y"
+            echo "CONFIG_NLS_DEFAULT=\"utf8\""
             
             # --- FULL eBPF SUPPORT CONFIGS ---
             echo "CONFIG_BPF=y"
@@ -152,6 +174,9 @@ jobs:
             echo "CONFIG_NET_CLS_BPF=y"
             echo "CONFIG_CGROUP_BPF=y"
             echo "CONFIG_BPF_EVENTS=y"
+            
+            # --- NEUTRON CLANG COMPATIBILITY ---
+            echo "CONFIG_WERROR=n"
           } >> gki_defconfig
 
       - name: Copy SUSFS kernel patches
@@ -371,9 +396,6 @@ jobs:
             '.rating =\t25,' \
             drivers/cpuidle/governors/teo.c || true
 
-          echo "Relaxing -Werror for vendor/module compat"
-          echo "CONFIG_WERROR=n" >> arch/arm64/configs/gki_defconfig
-
           echo "Raising ext4 default journal commit interval (5s->30s)"
           patch_default "ext4/jbd2 commit interval 5s->30s" \
             '#define[[:space:]]+JBD2_DEFAULT_MAX_COMMIT_AGE[[:space:]]+5' \
@@ -443,7 +465,7 @@ jobs:
           echo "Enabling 1000Hz kernel tick (lower scheduling latency)"
           echo "CONFIG_HZ_1000=y" >> arch/arm64/configs/gki_defconfig
 
-          echo "Enabling Kyber/Deadline I/O schedulers (available, not forced default)"
+          echo "Enabling Kyber/Deadline I/O schedulers"
           echo "CONFIG_MQ_IOSCHED_KYBER=y" >> arch/arm64/configs/gki_defconfig
           echo "CONFIG_MQ_IOSCHED_DEADLINE=y" >> arch/arm64/configs/gki_defconfig
 
@@ -470,11 +492,22 @@ jobs:
           grep -rl '^MODULES_ORDER=' build.config* 2>/dev/null | xargs -r sed -i 's/^MODULES_ORDER=.*/MODULES_ORDER=/' || true
           grep -rl '^MODULES_LIST=' build.config* 2>/dev/null | xargs -r sed -i 's/^MODULES_LIST=.*/MODULES_LIST=/' || true
 
-      - name: Build kernel
+      - name: Build kernel with Neutron Clang
         working-directory: kernel_workspace
         run: |
           set -euo pipefail
-          LTO=thin BUILD_CONFIG=common/build.config.gki.aarch64 USE_CCACHE=1 CCACHE_DIR="${CCACHE_DIR}" build/build.sh -j"$(nproc)"
+          export PATH="${GITHUB_WORKSPACE}/neutron-clang/bin:$PATH"
+          export REAL_CC="${GITHUB_WORKSPACE}/neutron-clang/bin/clang"
+          export CLANG_PREBUILT_BIN="${GITHUB_WORKSPACE}/neutron-clang/bin"
+          
+          LTO=thin \
+          BUILD_CONFIG=common/build.config.gki.aarch64 \
+          USE_CCACHE=1 \
+          CCACHE_DIR="${CCACHE_DIR}" \
+          CC=clang \
+          LLVM=1 \
+          LLVM_IAS=1 \
+          build/build.sh -j"$(nproc)"
 
       - name: Verify final configs
         working-directory: kernel_workspace
