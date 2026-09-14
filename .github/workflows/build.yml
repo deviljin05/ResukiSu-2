@@ -103,6 +103,54 @@ jobs:
           repo init -u https://android.googlesource.com/kernel/manifest -b "${MANIFEST_REF}" --depth=1
           repo sync -c --current-branch --no-clone-bundle --no-tags -j"$(nproc)"
 
+      - name: Ensure clang prebuilt toolchain is present (some manifests, esp. 'lts', omit it)
+        working-directory: kernel_workspace
+        run: |
+          set -euo pipefail
+          if find prebuilts/clang/host/linux-x86 -maxdepth 1 -type d -name 'clang-*' 2>/dev/null | grep -q .; then
+            echo "[+] clang prebuilt already present from repo sync"
+            exit 0
+          fi
+
+          echo "[!] No clang prebuilt under prebuilts/clang/host/linux-x86 after repo sync."
+          echo "    This manifest branch (${MANIFEST_REF}) likely doesn't declare that project"
+          echo "    (common for the rolling '-lts' manifest). Looking it up directly."
+
+          MANIFEST_FILE="$(grep -rl 'path="prebuilts/clang/host/linux-x86"' .repo/manifests/*.xml .repo/manifest.xml 2>/dev/null | head -n1 || true)"
+          if [ -z "${MANIFEST_FILE}" ] || [ ! -f "${MANIFEST_FILE}" ]; then
+            echo "::error::No <project path=\"prebuilts/clang/host/linux-x86\"> entry found in any synced manifest XML. This manifest branch doesn't ship a clang toolchain at all — use a dated maintenance branch (e.g. android12-5.10-2026-07) or an exact tag (e.g. android12-5.10.264_r00) instead of 'lts', or vendor your own clang and set CLANG_PREBUILT_BIN."
+            exit 1
+          fi
+
+          PROJ_LINE="$(grep -o '<project[^>]*path="prebuilts/clang/host/linux-x86"[^>]*/\{0,1\}>' "${MANIFEST_FILE}" | head -n1)"
+          PROJ_NAME="$(echo "${PROJ_LINE}" | grep -oE 'name="[^"]+"' | head -n1 | cut -d'"' -f2)"
+          PROJ_REV="$(echo "${PROJ_LINE}" | grep -oE 'revision="[^"]+"' | head -n1 | cut -d'"' -f2)"
+
+          if [ -z "${PROJ_NAME}" ] || [ -z "${PROJ_REV}" ]; then
+            echo "::error::Found a prebuilts/clang manifest entry in ${MANIFEST_FILE} but couldn't parse name/revision out of it: ${PROJ_LINE}"
+            exit 1
+          fi
+
+          echo "[+] Manifest declares: name=${PROJ_NAME} revision=${PROJ_REV}"
+          echo "[+] Fetching directly from https://android.googlesource.com/${PROJ_NAME}"
+
+          rm -rf /tmp/clang-fetch
+          git clone --filter=blob:none --no-checkout "https://android.googlesource.com/${PROJ_NAME}" /tmp/clang-fetch
+          cd /tmp/clang-fetch
+          git fetch --depth=1 origin "${PROJ_REV}"
+          git checkout FETCH_HEAD
+          cd -
+
+          mkdir -p prebuilts/clang/host/linux-x86
+          rsync -a --exclude='.git' /tmp/clang-fetch/ prebuilts/clang/host/linux-x86/
+          rm -rf /tmp/clang-fetch
+
+          if ! find prebuilts/clang/host/linux-x86 -maxdepth 1 -type d -name 'clang-*' 2>/dev/null | grep -q .; then
+            echo "::error::Direct fetch of ${PROJ_NAME}@${PROJ_REV} completed but no clang-* directory showed up under prebuilts/clang/host/linux-x86 — the revision may point at a different subpath layout. Inspect manually."
+            exit 1
+          fi
+          echo "[+] clang prebuilt fetched successfully"
+
       - name: Pin kernel/common to exact tag or branch
         if: ${{ env.PIN_TYPE != '' }}
         working-directory: kernel_workspace/common
