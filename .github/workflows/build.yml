@@ -49,7 +49,7 @@ jobs:
             build-essential python3 python3-pip python-is-python3 libncurses-dev \
             ccache zip unzip device-tree-compiler libelf-dev rsync \
             lld llvm clang
-            
+              
       - name: Sanity-check toolchain (python shim + LLVM linker)
         run: |
           set -euo pipefail
@@ -120,6 +120,78 @@ jobs:
           repo init -u https://android.googlesource.com/kernel/manifest -b "${MANIFEST_REF}" --depth=1
           repo sync -c --current-branch --no-clone-bundle --no-tags -j"$(nproc)"
 
+      - name: Provide 'ld' inside hermetic clang toolchain dir
+        working-directory: kernel_workspace
+        run: |
+          set -euo pipefail
+
+          echo "=== Searching for hermetic clang prebuilt ==="
+          # GKI manifest puts clang in one of these locations depending on
+          # the branch/version. Try all of them.
+          CANDIDATES=(
+            prebuilts/clang/host/linux-x86/clang-*/bin
+            prebuilts/clang/host/linux-x86/clang-*/bin64
+            prebuilts/clang/host/linux-x86/*/bin
+          )
+
+          CLANG_BIN=""
+          for pattern in "${CANDIDATES[@]}"; do
+            for d in $pattern; do
+              [ -d "$d" ] || continue
+              if [ -x "$d/clang" ]; then
+                CLANG_BIN="$d"
+                break 2
+              fi
+            done
+          done
+
+          if [ -z "$CLANG_BIN" ]; then
+            echo "::warning::Could not find hermetic clang. Dumping prebuilts tree:"
+            find prebuilts -maxdepth 4 -type d -name 'clang*' 2>/dev/null || true
+            echo "::warning::Falling back to system clang — build.sh will likely still use prebuilt."
+            exit 0
+          fi
+
+          echo "[+] Hermetic clang bin dir: $CLANG_BIN"
+          ls -la "$CLANG_BIN" | grep -E ' (clang|ld|llvm-|ld\.lld)' | head -40
+
+          # Case 1: toolchain ships ld.lld, no bare 'ld'
+          if [ -x "$CLANG_BIN/ld.lld" ] && [ ! -e "$CLANG_BIN/ld" ]; then
+            sudo ln -sf "$CLANG_BIN/ld.lld" "$CLANG_BIN/ld"
+            echo "[+] $CLANG_BIN/ld -> ld.lld (toolchain-local)"
+          fi
+
+          # Case 2: no ld.lld at all — use system lld from apt
+          if [ ! -e "$CLANG_BIN/ld" ]; then
+            SYS_LLD="$(command -v ld.lld || true)"
+            if [ -z "$SYS_LLD" ]; then
+              echo "::error::No ld.lld anywhere — cannot satisfy clang's linker lookup"
+              exit 1
+            fi
+            sudo ln -sf "$SYS_LLD" "$CLANG_BIN/ld"
+            echo "[+] $CLANG_BIN/ld -> $SYS_LLD (system lld)"
+          fi
+
+          echo "=== Verifying ==="
+          ls -la "$CLANG_BIN/ld"*
+          "$CLANG_BIN/ld" --version | head -n1
+
+      - name: Confirm CLANG_VERSION matches what build.sh expects
+        working-directory: kernel_workspace
+        run: |
+          set -euo pipefail
+          echo "=== build.config.constants CLANG_VERSION ==="
+          grep -nE 'CLANG_VERSION' common/build.config.constants 2>/dev/null || true
+          echo "=== Actual prebuilt dirs ==="
+          ls -d prebuilts/clang/host/linux-x86/clang-*/ 2>/dev/null || echo "none found"
+          echo "=== ld.lld in the CLANG_VERSION dir ==="
+          CV=$(grep -m1 '^CLANG_VERSION=' common/build.config.constants 2>/dev/null | cut -d= -f2)
+          if [ -n "$CV" ] && [ -d "prebuilts/clang/host/linux-x86/${CV}/bin" ]; then
+            ls -la "prebuilts/clang/host/linux-x86/${CV}/bin/" | grep -E 'ld|clang' | head -30
+          else
+            echo "::warning::Could not resolve CLANG_VERSION dir ($CV)"
+          fi
+          
       - name: Pin kernel/common to exact tag or branch
         if: ${{ env.PIN_TYPE != '' }}
         working-directory: kernel_workspace/common
@@ -792,6 +864,103 @@ jobs:
           grep -RhnE '^(KMI_SYMBOL_LIST|KMI_SYMBOL_LIST_STRICT_MODE|ADDITIONAL_KMI_SYMBOL_LISTS|TRIM_NONLISTED_KMI|KMI_ENFORCED|ABI_DEFINITION|TIDY_ABI|MODULES_LIST|MODULES_ORDER)=' build.config* || true
           echo "---- sanity check: no orphan bare 'android/...' lines outside quotes ----"
           grep -RnE '^\s*android/abi_gki' build.config* || echo "clean"
+
+      - name: Force LD in build configs
+        working-directory: kernel_workspace/common
+        run: |
+          set -euo pipefail
+          for f in build.config.gki.aarch64 build.config.gki.aarch64.fips \
+                   build.config.common build.config.aarch64 build.config.gki; do
+            [ -f "$f" ] || continue
+            sed -i '/^[[:space:]]*LD=/d' "$f"
+            echo 'LD=ld.lld' >> "$f"
+            echo "[+] appended LD=ld.lld to $f"
+          done
+          echo "---- LD lines now ----"
+          grep -HnE '^LD=' build.config* || true
+
+      - name: Patch build.sh to export LD=ld.lld into make
+        working-directory: kernel_workspace
+        run: |
+          set -euo pipefail
+
+          # build/build.sh (via build/_setup_env.sh) builds MAKE_ARGS.
+          # On android12-5.10 MAKE_ARGS does NOT include LD/AR/NM/..., so
+          # every inner `make` call (mrproper, olddefconfig, build) falls
+          # back to bare 'ld' → "Executable \"ld\" doesn't exist!".
+          #
+          # The reliable fix is to force these as environment variables
+          # that build/_setup_env.sh will export to make, AND add them to
+          # MAKE_ARGS wherever it's defined.
+
+          TARGET_ENV="build/_setup_env.sh"
+          TARGET_SH="build/build.sh"
+
+          echo "=== Patching MAKE_ARGS in ${TARGET_ENV} ==="
+          if [ -f "$TARGET_ENV" ]; then
+            # Remove any previous injection so re-runs are clean
+            sed -i '/# INJECTED-BY-WORKFLOW/d' "$TARGET_ENV"
+
+            # Append our overrides right after every MAKE_ARGS= line,
+            # and tag it so we can detect it next time.
+            # Using a full-line rewrite is safest: strip any trailing
+            # closure, then re-add it.
+            perl -0777 -i -pe '
+              s{(MAKE_ARGS\s*=\s*")([^"]*)(")}{$1$2 LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip READELF=llvm-readelf$3}g;
+              s{(MAKE_ARGS\s*=\s*)(\S+)(\s*$)}{$1$2" LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip READELF=llvm-readelf"$3}gm;
+            ' "$TARGET_ENV" || true
+
+            # Belt-and-suspenders: also export as env vars so
+            # build.sh's `env` inherits them.
+            cat >> "$TARGET_ENV" <<'EOF'
+
+          # INJECTED-BY-WORKFLOW
+          export LD=ld.lld
+          export AR=llvm-ar
+          export NM=llvm-nm
+          export OBJCOPY=llvm-objcopy
+          export OBJDUMP=llvm-objdump
+          export STRIP=llvm-strip
+          export READELF=llvm-readelf
+          export LLVM=1
+          export LLVM_IAS=1
+          EOF
+            echo "[+] patched $TARGET_ENV"
+          else
+            echo "::warning::$TARGET_ENV not found — trying $TARGET_SH"
+          fi
+
+          echo "=== Patching MAKE_ARGS in ${TARGET_SH} ==="
+          if [ -f "$TARGET_SH" ]; then
+            sed -i '/# INJECTED-BY-WORKFLOW/d' "$TARGET_SH"
+            cat >> "$TARGET_SH" <<'EOF'
+
+          # INJECTED-BY-WORKFLOW
+          export LD=ld.lld
+          export AR=llvm-ar
+          export NM=llvm-nm
+          export OBJCOPY=llvm-objcopy
+          export OBJDUMP=llvm-objdump
+          export STRIP=llvm-strip
+          export READELF=llvm-readelf
+          EOF
+            echo "[+] appended env exports to $TARGET_SH"
+          fi
+
+          echo "=== Verification ==="
+          grep -n 'MAKE_ARGS' "$TARGET_ENV" 2>/dev/null | head -20 || true
+          grep -nE '^(export )?(LD|AR|NM|OBJCOPY|OBJDUMP|STRIP|READELF)=' "$TARGET_ENV" 2>/dev/null || true
+
+      - name: Debug — verify ld is reachable
+        working-directory: kernel_workspace
+        run: |
+          set -euo pipefail
+          CLANG_BIN="$(echo prebuilts/clang/host/linux-x86/clang-*/bin | awk '{print $1}')"
+          echo "Hermetic clang bin: $CLANG_BIN"
+          ls -la "$CLANG_BIN"/ld* 2>&1 || true
+          command -v ld.lld && ld.lld --version | head -n1 || echo "ld.lld missing on PATH"
+          grep -nE '^LD[[:space:]]*=' common/Makefile || true
+          grep -HnE '^LD=' common/build.config* || true
 
       - name: Build kernel
         working-directory: kernel_workspace
