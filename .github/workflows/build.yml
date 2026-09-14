@@ -217,14 +217,7 @@ jobs:
             sed -i -e 's/goto show_pad;/return 0;/' ./fs/proc/task_mmu.c
           fi
 
-      # ─── 18-23: REMAINING PATCHES (SUSFS ke baad, defconfig se pehle) ──
-      - name: Apply NetHunter injection patches (mizdrake7 22cd3952)
-        working-directory: kernel_workspace/common
-        run: |
-          set -euo pipefail
-          curl -fsSL "https://github.com/mizdrake7/kernel_xiaomi_air/commit/22cd39520ec91fc9e8e622c5deae1994abbd0f55.patch" -o /tmp/nethunter-injection.patch
-          patch -p1 --fuzz=3 < /tmp/nethunter-injection.patch
-
+      # ─── 18-22: REMAINING PATCHES (SUSFS ke baad, defconfig se pehle) ──
       - name: Apply BBRv3 patch
         if: ${{ github.event.inputs.enable_bbrv3 == 'true' }}
         working-directory: kernel_workspace/common
@@ -345,9 +338,15 @@ jobs:
             echo "CONFIG_MAC80211_RC_MINSTREL=y"
             echo "CONFIG_MAC80211_RC_DEFAULT_MINSTREL=y"
 
-            # NetHunter
+            # NetHunter (generic — no device-specific patch needed)
             echo "CONFIG_PACKET_DIAG=y"
             echo "CONFIG_USB_G_HID=y"
+            echo "CONFIG_USB_CONFIGFS_F_HID=y"
+            echo "CONFIG_USB_CONFIGFS_MASS_STORAGE=y"
+            echo "CONFIG_TUN=y"
+            echo "CONFIG_NETFILTER_XT_TARGET_TCPMSS=y"
+            echo "CONFIG_NETFILTER_XT_MATCH_STATE=y"
+            echo "CONFIG_IP_NF_TARGET_MASQUERADE=y"
 
             # Atheros
             echo "CONFIG_WLAN_VENDOR_ATH=y"
@@ -512,6 +511,7 @@ jobs:
           echo /system/etc/firmware > /sys/module/firmware_class/parameters/path 2>>$LOG
 
           load() {
+            lsmod | grep -q "^$1 " && { echo "$1 already loaded by vendor stack — skipping" >>$LOG; return; }
             [ -f "$MODDIR/system/lib/modules/$1.ko" ] && insmod "$MODDIR/system/lib/modules/$1.ko" >>$LOG 2>&1
           }
 
