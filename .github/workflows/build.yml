@@ -135,7 +135,7 @@ jobs:
           echo "SUBLEVEL=${SUBLEVEL}" >> "$GITHUB_ENV"
           echo "Kernel sublevel: ${SUBLEVEL}"
 
-      # ─── 10-12: CLONE PATCH SOURCES + KERNELSU SETUP ───────────────
+      # ─── 10-11: CLONE PATCH SOURCES + KERNELSU SETUP ───────────────
       # ReSukiSU MUST be set up before the SUSFS patch is applied — the
       # susfs4ksu patch touches files inside the KernelSU driver tree,
       # which don't exist until ReSukiSU's setup.sh has run.
@@ -151,18 +151,6 @@ jobs:
           fi
           echo "SUSFS_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
 
-      - name: Clone Droidspaces patches
-        if: ${{ github.event.inputs.enable_safekabi == 'true' }}
-        working-directory: kernel_workspace
-        run: |
-          set -euo pipefail
-          git clone --depth=1 https://github.com/WildKernels/kernel_patches.git kpatch 2>/dev/null || \
-          git clone --depth=1 https://github.com/Droidspaces/kernel_patches.git kpatch 2>/dev/null || \
-          echo "Droidspaces repo not found — skipping"
-          if [ -d kpatch ]; then
-            echo "KPATCH_DIR=kpatch" >> "$GITHUB_ENV"
-          fi
-
       - name: Setup ReSukiSU
         working-directory: kernel_workspace/common
         run: |
@@ -175,7 +163,7 @@ jobs:
             curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash
           fi
 
-      # ─── 13-18: SUSFS PATCH CHAIN (ReSukiSU already in tree, clean context) ─
+      # ─── 12-17: SUSFS PATCH CHAIN (ReSukiSU already in tree, clean context) ─
       - name: Copy SUSFS kernel patches
         run: |
           cd kernel_workspace/common
@@ -229,7 +217,7 @@ jobs:
             sed -i -e 's/goto show_pad;/return 0;/' ./fs/proc/task_mmu.c
           fi
 
-      # ─── 19-25: REMAINING PATCHES (SUSFS ke baad, defconfig se pehle) ──
+      # ─── 18-23: REMAINING PATCHES (SUSFS ke baad, defconfig se pehle) ──
       - name: Apply NetHunter injection patches (mizdrake7 22cd3952)
         working-directory: kernel_workspace/common
         run: |
@@ -287,19 +275,7 @@ jobs:
             patch -p1 --fuzz=3 < /tmp/safekabi.patch || echo "SAFE kabi patch partial"
           fi
 
-      - name: Apply Droidspaces patch set
-        if: ${{ github.event.inputs.enable_safekabi == 'true' && env.KPATCH_DIR != '' }}
-        working-directory: kernel_workspace/common
-        run: |
-          set -euo pipefail
-          if [ -d "../kpatch" ]; then
-            find ../kpatch -name "*.patch" | head -20 | while read p; do
-              echo "Applying: $p"
-              patch -p1 --fuzz=3 < "$p" || echo "  partial/failed — continuing"
-            done
-          fi
-
-      # ─── 26: DEFCONFIG (sab patches ke baad — naye CONFIG_ options ke liye)
+      # ─── 24: DEFCONFIG (sab patches ke baad — naye CONFIG_ options ke liye)
       - name: Set Defconfig (SUSFS + Droidspaces + BBRv3 + BPF + Wireless)
         run: |
           cd kernel_workspace/common/arch/arm64/configs
@@ -423,7 +399,7 @@ jobs:
             echo "CONFIG_WERROR=n"
           } >> gki_defconfig
 
-      # ─── 27: KMI/ABI NEUTRALIZE ───────────────────────────────────
+      # ─── 25: KMI/ABI NEUTRALIZE ───────────────────────────────────
       - name: Disable strict ABI/KMI checks and module list validations
         working-directory: kernel_workspace
         run: |
@@ -449,7 +425,7 @@ jobs:
           echo "---- KMI/ABI lines ----"
           grep -RhnE '^(KMI_SYMBOL_LIST|KMI_SYMBOL_LIST_STRICT_MODE|ADDITIONAL_KMI_SYMBOL_LISTS|TRIM_NONLISTED_KMI|KMI_ENFORCED|ABI_DEFINITION|TIDY_ABI|MODULES_LIST|MODULES_ORDER)=' build.config* || true
 
-      # ─── 28-29: BUILD + LOCATE ────────────────────────────────────
+      # ─── 26-27: BUILD + LOCATE ────────────────────────────────────
       - name: Build kernel
         working-directory: kernel_workspace
         env:
@@ -475,7 +451,7 @@ jobs:
           DIST_DIR=$(dirname "${IMG}")
           echo "DIST_DIR=kernel_workspace/${DIST_DIR}" >> "$GITHUB_ENV"
 
-      # ─── 30-31: OUT-OF-TREE + FIRMWARE ────────────────────────────
+      # ─── 28-29: OUT-OF-TREE + FIRMWARE ────────────────────────────
       - name: Build aircrack-ng Realtek drivers (out-of-tree, CFI-safe)
         working-directory: kernel_workspace
         run: |
@@ -497,7 +473,7 @@ jobs:
           curl -fsSL -o Wireless_Nethunter_Firmware_v3.zip \
             https://github.com/mizdrake7/kernel_xiaomi_air/releases/download/V4/Wireless_Nethunter_Firmware_v3.zip
 
-      # ─── 32-33: PACKAGE ───────────────────────────────────────────
+      # ─── 30-31: PACKAGE ───────────────────────────────────────────
       - name: Package Clean AnyKernel3 Kernel Zip
         run: |
           set -euo pipefail
@@ -574,7 +550,7 @@ jobs:
           cd wireless_module
           zip -r9 -q "../${{ github.event.inputs.device_name }}-wireless.zip" .
 
-      # ─── 34: UPLOAD ───────────────────────────────────────────────
+      # ─── 32: UPLOAD ───────────────────────────────────────────────
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
