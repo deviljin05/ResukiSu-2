@@ -1,4 +1,4 @@
-name: Build Custom GKI Kernel (ReSukiSU + SUSFS + BBRv3 + Droidspaces + Mizdrake7 Wireless + NetHunter)
+name: Build Custom GKI Kernel (ReSukiSU + SUSFS + BBRv3 + Mizdrake7 Wireless)
 
 on:
   workflow_dispatch:
@@ -11,34 +11,6 @@ on:
         description: "SUSFS commit hash (leave empty = latest)"
         required: false
         default: ""
-      resukisu_ref:
-        description: "ReSukiSU branch/tag/commit (empty = main)"
-        required: false
-        default: "main"
-      droidspaces_ref:
-        description: "Droidspaces patch ref (empty = main)"
-        required: false
-        default: "main"
-      enable_bbrv3:
-        description: "Enable BBRv3 TCP congestion control"
-        required: false
-        default: "true"
-      enable_unicode_fix:
-        description: "Enable Unicode bypass fix"
-        required: false
-        default: "true"
-      enable_ptrace_fix:
-        description: "Enable ptrace hardening fix"
-        required: false
-        default: "true"
-      enable_bpf_patches:
-        description: "Enable BPF hardening patches"
-        required: false
-        default: "true"
-      enable_safekabi:
-        description: "Enable safe kabi patches"
-        required: false
-        default: "true"
       device_name:
         description: "Optional label for artifact naming"
         required: false
@@ -51,10 +23,9 @@ env:
 jobs:
   build:
     runs-on: ubuntu-22.04
-    timeout-minutes: 240
+    timeout-minutes: 150
 
     steps:
-      # ─── 1-9: SETUP ───────────────────────────────────────────────
       - name: Checkout Repository
         uses: actions/checkout@v4
 
@@ -68,8 +39,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y git curl bc bison flex libssl-dev \
             build-essential python3 python3-pip libncurses-dev \
-            ccache zip unzip device-tree-compiler libelf-dev lz4 cpio \
-            pahole
+            ccache zip unzip device-tree-compiler libelf-dev
 
       - name: Install repo tool
         run: |
@@ -133,12 +103,7 @@ jobs:
           set -euo pipefail
           SUBLEVEL="$(grep -m1 '^SUBLEVEL = ' common/Makefile | awk '{print $3}')"
           echo "SUBLEVEL=${SUBLEVEL}" >> "$GITHUB_ENV"
-          echo "Kernel sublevel: ${SUBLEVEL}"
 
-      # ─── 10-11: CLONE PATCH SOURCES + KERNELSU SETUP ───────────────
-      # ReSukiSU MUST be set up before the SUSFS patch is applied — the
-      # susfs4ksu patch touches files inside the KernelSU driver tree,
-      # which don't exist until ReSukiSU's setup.sh has run.
       - name: Clone SUSFS4KSU
         working-directory: kernel_workspace
         run: |
@@ -146,24 +111,238 @@ jobs:
           git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android12-5.10 susfs4ksu
           cd susfs4ksu
           if [ -n "${{ github.event.inputs.susfs_commit }}" ]; then
-            git fetch --depth=1 origin "${{ github.event.inputs.susfs_commit }}" 2>/dev/null || true
             git checkout "${{ github.event.inputs.susfs_commit }}"
           fi
           echo "SUSFS_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
 
-      - name: Setup ReSukiSU
+      - name: Set Mizdrake7 Style Defconfig (SUSFS + Modular Wireless)
+        run: |
+          cd kernel_workspace/common/arch/arm64/configs
+          {
+            echo "CONFIG_KSU=y"
+            echo "CONFIG_KSU_SUSFS=y"
+            echo "CONFIG_KSU_SUSFS_SUS_PATH=y"
+            echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y"
+            echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y"
+            echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y"
+            echo "CONFIG_KSU_SUSFS_ENABLE_LOG=y"
+            echo "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y"
+            echo "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y"
+            echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y"
+            echo "CONFIG_KSU_SUSFS_SUS_MAP=y"
+
+            # --- MIZDRAKE7 NETHUNTER WIRELESS CONFIGS ---
+            # This is the exact config set from mizdrake7/kernel_xiaomi_air
+            # commit 3d298e7 ("defconfig: Enable Nethunter"), applied here
+            # to arch/arm64/configs/gki_defconfig instead of his device's
+            # mgk_64_k515_defconfig. Kept the base wireless subsystem lines
+            # (NETDEVICES/WLAN/WIRELESS/_HAS_RC/_MINSTREL/etc.) since GKI's
+            # own defconfig doesn't already select them the way his MTK
+            # vendor base did — his commit only had to add the driver-level
+            # symbols below because CFG80211/MAC80211/WLAN core was already
+            # on in his tree.
+            echo "CONFIG_NETDEVICES=y"
+            echo "CONFIG_WLAN=y"
+            echo "CONFIG_WIRELESS=y"
+            echo "CONFIG_CFG80211=m"
+            echo "CONFIG_CFG80211_INTERNAL_REGDB=y"
+            echo "CONFIG_MAC80211=m"
+            echo "CONFIG_MAC80211_HAS_RC=y"
+            echo "CONFIG_MAC80211_RC_MINSTREL=y"
+            echo "CONFIG_MAC80211_RC_DEFAULT_MINSTREL=y"
+
+            # Nethunter (verbatim from mizdrake7's commit)
+            echo "CONFIG_PACKET_DIAG=y"
+            echo "CONFIG_USB_G_HID=y"
+
+            # Atheros
+            echo "CONFIG_WLAN_VENDOR_ATH=y"
+            echo "CONFIG_ATH9K_HTC=m"
+            echo "CONFIG_ATH_CARDS=m"
+            echo "CONFIG_CARL9170=m"
+
+            # Ralink / RT2800
+            echo "CONFIG_WLAN_VENDOR_RALINK=y"
+            echo "CONFIG_RT2X00=m"
+            echo "CONFIG_RT2X00_LIB=m"
+            echo "CONFIG_RT2X00_LIB_USB=m"
+            echo "CONFIG_RT2800USB=m"
+            echo "CONFIG_RT2800USB_RT33XX=y"
+            echo "CONFIG_RT2800USB_RT35XX=y"
+            echo "CONFIG_RT2800USB_RT3573=y"
+            echo "CONFIG_RT2800USB_RT53XX=y"
+            echo "CONFIG_RT2800USB_RT55XX=y"
+            echo "CONFIG_RT2800USB_UNKNOWN=y"
+
+            # Realtek
+            echo "CONFIG_WLAN_VENDOR_REALTEK=y"
+            echo "CONFIG_RTL8187=m"
+            echo "CONFIG_RTL8192CU=m"
+
+            # MediaTek MT7601U
+            echo "CONFIG_WLAN_VENDOR_MEDIATEK=y"
+            echo "CONFIG_MT7601U=m"
+
+            # Realtek RTL8XXXU family (covers RTL8188CUS/CU, RTL8192CU,
+            # RTL8723AU, RTL8188EU) — separate driver from RTL8187, added
+            # for RTL8188CUS-based Alfa/generic USB adapters.
+            echo "CONFIG_RTL8XXXU=m"
+
+            # Firmware + USB
+            echo "CONFIG_FW_LOADER=y"
+            echo "CONFIG_USB_SUPPORT=y"
+            echo "CONFIG_USB_NET_DRIVERS=y"
+            echo "CONFIG_USB_USBNET=y"
+
+            # RFKILL — required by several drivers' soft/hard block switch
+            echo "CONFIG_RFKILL=y"
+            echo "CONFIG_RFKILL_LEDS=y"
+
+            # Crypto — WEP/WPA-TKIP support (needed for handshake/legacy auth)
+            echo "CONFIG_CRYPTO_ARC4=m"
+            echo "CONFIG_CRYPTO_ECB=m"
+            echo "CONFIG_CRYPTO_AES=y"
+            echo "CONFIG_CRYPTO_MICHAEL_MIC=m"
+            echo "CONFIG_CRC_CCITT=m"
+            echo "CONFIG_CRC_ITU_T=m"
+
+            echo "CONFIG_WERROR=n"
+          } >> gki_defconfig
+
+      - name: Apply mizdrake7 NetHunter injection patches (rtl8187, zd1211rw, mac80211, cfg80211)
         working-directory: kernel_workspace/common
         run: |
           set -euo pipefail
-          REF="${{ github.event.inputs.resukisu_ref }}"
-          if [ -z "${REF}" ] || [ "${REF}" = "main" ]; then
-            curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash
-          else
-            curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/${REF}/kernel/setup.sh" | bash || \
-            curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash
-          fi
+          # Source: mizdrake7/kernel_xiaomi_air@22cd395
+          # "apply NetHunter wireless injection + ath9k naming + dtc lexer patches"
+          python3 - <<'PYEOF'
+          import pathlib
 
-      # ─── 12-17: SUSFS PATCH CHAIN (ReSukiSU already in tree, clean context) ─
+          def patch(path, old, new, label):
+              p = pathlib.Path(path)
+              if not p.exists():
+                  print(f"[skip] {label}: {path} not found in this tree")
+                  return
+              text = p.read_text()
+              n = text.count(old)
+              if n != 1:
+                  print(f"[WARN] {label}: expected 1 match, found {n} — skipping (check context manually)")
+                  return
+              p.write_text(text.replace(old, new, 1))
+              print(f"[ok] {label}")
+
+          # 1) rtl8187: only force MOREFRAG flag when NOT in monitor mode
+          patch(
+              "drivers/net/wireless/realtek/rtl818x/rtl8187/dev.c",
+              "\tif (ieee80211_has_morefrags(tx_hdr->frame_control))\n"
+              "\t\tflags |= RTL818X_TX_DESC_FLAG_MOREFRAG;\n",
+              "\t// When this flag is set the firmware waits untill ALL fragments have\n"
+              "\t// reached the USB device. Then it sends the first fragment and waits\n"
+              "\t// for ACKS's. Of course in monitor mode it won't detect these ACK's.\n"
+              "\tif (ieee80211_has_morefrags(tx_hdr->frame_control))\n"
+              "\t{\n"
+              "\t\t// If info->control.vif is NULL it's most likely in monitor mode\n"
+              "\t\tif (likely(info->control.vif != NULL && info->control.vif->type != NL80211_IFTYPE_MONITOR)) {\n"
+              "\t\t\tflags |= RTL818X_TX_DESC_FLAG_MOREFRAG;\n"
+              "\t\t}\n"
+              "\t}\n",
+              "rtl8187 MOREFRAG monitor-mode fix",
+          )
+
+          # 2) zd1211rw: set_rx_filter -> ioreqs array (adds CR_SNIFFER_ON)
+          patch(
+              "drivers/net/wireless/zydas/zd1211rw/zd_mac.c",
+              "\tunsigned long flags;\n"
+              "\tu32 filter = STA_RX_FILTER;\n\n"
+              "\tspin_lock_irqsave(&mac->lock, flags);\n"
+              "\tif (mac->pass_ctrl)\n"
+              "\t\tfilter |= RX_FILTER_CTRL;\n"
+              "\tspin_unlock_irqrestore(&mac->lock, flags);\n\n"
+              "\treturn zd_iowrite32(&mac->chip, CR_RX_FILTER, filter);\n",
+              "\tunsigned long flags;\n"
+              "\tstruct zd_ioreq32 ioreqs[] = {\n"
+              "\t\t{CR_RX_FILTER, STA_RX_FILTER},\n"
+              "\t\t{ CR_SNIFFER_ON, 0U },\n"
+              "\t};\n\n"
+              "\tspin_lock_irqsave(&mac->lock, flags);\n"
+              "\tif (mac->pass_ctrl) {\n"
+              "\t\tioreqs[0].value |= 0xFFFFFFFF;\n"
+              "\t\tioreqs[1].value = 0x1;\n"
+              "\t}\n"
+              "\tspin_unlock_irqrestore(&mac->lock, flags);\n\n"
+              "\treturn zd_iowrite32a(&mac->chip, ioreqs, ARRAY_SIZE(ioreqs));\n",
+              "zd1211rw set_rx_filter -> sniffer ioreqs",
+          )
+
+          # 3) zd1211rw: widen RX error check
+          patch(
+              "drivers/net/wireless/zydas/zd1211rw/zd_mac.c",
+              "\tif (status->frame_status & ZD_RX_ERROR) {\n",
+              "\tif ((status->frame_status & ZD_RX_ERROR) ||\n"
+              "\t\t(status->frame_status & ~0x21)) {\n",
+              "zd1211rw rx frame_status check",
+          )
+
+          # 4) zd1211rw: SIGNAL_UNSPEC -> SIGNAL_DBM
+          patch(
+              "drivers/net/wireless/zydas/zd1211rw/zd_mac.c",
+              "\tieee80211_hw_set(hw, SIGNAL_UNSPEC);\n",
+              "\tieee80211_hw_set(hw, SIGNAL_DBM);\n",
+              "zd1211rw SIGNAL_DBM",
+          )
+
+          # 5) mac80211: honor injected-packet sequence numbering / NO_ACK
+          patch(
+              "net/mac80211/tx.c",
+              "\t/*\n"
+              "\t * Packet injection may want to control the sequence\n"
+              "\t * number, if we have no matching interface then we\n"
+              "\t * neither assign one ourselves nor ask the driver to.\n"
+              "\t */\n"
+              "\tif (unlikely(info->control.vif->type == NL80211_IFTYPE_MONITOR))\n"
+              "\t\treturn TX_CONTINUE;\n",
+              "\t/*\n"
+              "\t * Packet injection may want to control the sequence\n"
+              "\t * number, so if an injected packet is found, skip\n"
+              "\t * renumbering it. Also make the packet NO_ACK to avoid\n"
+              "\t * excessive retries (ACKing and retrying should be\n"
+              "\t * handled by the injecting application).\n"
+              "\t * FIXME This may break hostapd and some other injectors.\n"
+              "\t * This should be done using a radiotap flag.\n"
+              "\t */\n"
+              "\tif (unlikely((info->flags & IEEE80211_TX_CTL_INJECTED) &&\n"
+              "\t   !(tx->sdata->u.mntr.flags & MONITOR_FLAG_COOK_FRAMES))) {\n"
+              "\t\tif (!ieee80211_has_morefrags(hdr->frame_control))\n"
+              "\t\t\tinfo->flags |= IEEE80211_TX_CTL_NO_ACK;\n"
+              "\t\treturn TX_CONTINUE;\n"
+              "\t}\n",
+              "mac80211 injected packet seqno/NO_ACK",
+          )
+
+          # 6) mac80211: don't overwrite QoS header in monitor mode
+          patch(
+              "net/mac80211/tx.c",
+              "\tieee80211_set_qos_hdr(sdata, skb);\n\tieee80211_tx(sdata, sta, skb, false);\n",
+              "        // Don't overwrite QoS header in monitor mode\n"
+              "        if (likely(info->control.vif->type != NL80211_IFTYPE_MONITOR)) {\n"
+              "            ieee80211_set_qos_hdr(sdata, skb);\n"
+              "        }\n"
+              "\tieee80211_tx(sdata, sta, skb, false);\n",
+              "mac80211 skip QoS hdr in monitor mode",
+          )
+
+          # 7) cfg80211: allow monitor channel change even with other vifs up
+          patch(
+              "net/wireless/chan.c",
+              "\tif (!cfg80211_has_monitors_only(rdev))\n\t\treturn -EBUSY;\n",
+              "\t// Always allow user to change channel, even if there is another normal\n"
+              "\t// virtual interface using the device.\n"
+              "\t//if (!cfg80211_has_monitors_only(rdev))\n"
+              "\t//\treturn -EBUSY;\n",
+              "cfg80211 monitor channel EBUSY removal",
+          )
+          PYEOF
+
       - name: Copy SUSFS kernel patches
         run: |
           cd kernel_workspace/common
@@ -217,227 +396,94 @@ jobs:
             sed -i -e 's/goto show_pad;/return 0;/' ./fs/proc/task_mmu.c
           fi
 
-      # ─── 18-22: REMAINING PATCHES (SUSFS ke baad, defconfig se pehle) ──
-      - name: Apply BBRv3 patch
-        if: ${{ github.event.inputs.enable_bbrv3 == 'true' }}
+      - name: Setup ReSukiSU
         working-directory: kernel_workspace/common
         run: |
           set -euo pipefail
-          curl -fsSL "https://raw.githubusercontent.com/google/bbr/v3/0001-net-tcp-bbr3-backport.patch" -o /tmp/bbrv3.patch 2>/dev/null || true
-          if [ -s /tmp/bbrv3.patch ]; then
-            patch -p1 --fuzz=3 < /tmp/bbrv3.patch || echo "BBRv3 patch partial/failed — continuing"
-          else
-            echo "BBRv3 patch not fetched — CONFIG_TCP_CONG_BBR=y fallback (BBR v1)"
-          fi
+          curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash
 
-      - name: Apply Unicode bypass fix
-        if: ${{ github.event.inputs.enable_unicode_fix == 'true' }}
-        working-directory: kernel_workspace/common
-        run: |
-          set -euo pipefail
-          if [ -f fs/unicode/utf8-core.c ]; then
-            echo "Unicode fix: file exists, config-level enable"
-          fi
-
-      - name: Apply ptrace hardening fix
-        if: ${{ github.event.inputs.enable_ptrace_fix == 'true' }}
-        working-directory: kernel_workspace/common
-        run: |
-          set -euo pipefail
-          if [ -f kernel/ptrace.c ]; then
-            echo "ptrace: applying Yama LSM / seccomp trace restriction (config-level)"
-          fi
-          if [ -f security/selinux/hooks.c ]; then
-            echo "SELinux ptrace hooks present"
-          fi
-
-      - name: Apply BPF hardening patches
-        if: ${{ github.event.inputs.enable_bpf_patches == 'true' }}
-        working-directory: kernel_workspace/common
-        run: |
-          set -euo pipefail
-          echo "BPF hardening: config-level (unprivileged_bpf_disabled=2, BPF_JIT_ALWAYS_ON=y)"
-
-      - name: Apply SAFE kabi patches
-        if: ${{ github.event.inputs.enable_safekabi == 'true' }}
-        working-directory: kernel_workspace/common
-        run: |
-          set -euo pipefail
-          curl -fsSL "https://raw.githubusercontent.com/WildKernels/kernel_patches/main/safekabi.patch" -o /tmp/safekabi.patch 2>/dev/null || true
-          if [ -s /tmp/safekabi.patch ]; then
-            patch -p1 --fuzz=3 < /tmp/safekabi.patch || echo "SAFE kabi patch partial"
-          fi
-
-      # ─── 24: DEFCONFIG (sab patches ke baad — naye CONFIG_ options ke liye)
-      - name: Set Defconfig (SUSFS + Droidspaces + BBRv3 + BPF + Wireless)
-        run: |
-          cd kernel_workspace/common/arch/arm64/configs
-          {
-            # KSU/SUSFS
-            echo "CONFIG_KSU=y"
-            echo "CONFIG_KSU_SUSFS=y"
-            echo "CONFIG_KSU_SUSFS_SUS_PATH=y"
-            echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y"
-            echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y"
-            echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y"
-            echo "CONFIG_KSU_SUSFS_ENABLE_LOG=y"
-            echo "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y"
-            echo "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y"
-            echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y"
-            echo "CONFIG_KSU_SUSFS_SUS_MAP=y"
-
-            # Droidspaces
-            echo "CONFIG_NAMESPACES=y"
-            echo "CONFIG_UTS_NS=y"
-            echo "CONFIG_IPC_NS=y"
-            echo "CONFIG_PID_NS=y"
-            echo "CONFIG_NET_NS=y"
-            echo "CONFIG_USER_NS=y"
-            echo "CONFIG_CGROUP_DEVICE=y"
-            echo "CONFIG_CGROUP_PIDS=y"
-            echo "CONFIG_CGROUP_FREEZER=y"
-            echo "CONFIG_MEMCG=y"
-            echo "CONFIG_MEMCG_SWAP=y"
-            echo "CONFIG_OVERLAY_FS=y"
-            echo "CONFIG_FUSE_FS=y"
-
-            # BBRv3
-            echo "CONFIG_TCP_CONG_BBR=y"
-            echo "CONFIG_TCP_CONG_CUBIC=y"
-            echo "CONFIG_DEFAULT_TCP_CONG=\"bbr\""
-            echo "CONFIG_NET_SCH_FQ=y"
-            echo "CONFIG_NET_SCH_FQ_CODEL=y"
-            echo "CONFIG_TCP_CONG_BBR2=y"
-
-            # Unicode
-            echo "CONFIG_UNICODE=y"
-            echo "CONFIG_UNICODE_NORMALIZATION_SELFTEST=n"
-
-            # ptrace
-            echo "CONFIG_SECURITY_YAMA=y"
-            echo "CONFIG_SECURITY_YAMA_STACKED=y"
-            echo "CONFIG_SECURITY_SELINUX=y"
-            echo "CONFIG_SECURITY_SELINUX_BOOTPARAM=y"
-
-            # BPF
-            echo "CONFIG_BPF_JIT_ALWAYS_ON=y"
-            echo "CONFIG_BPF_JIT_DEFAULT_ON=y"
-            echo "CONFIG_BPF_UNPRIV_DEFAULT_OFF=y"
-            echo "CONFIG_HAVE_EBPF_JIT=y"
-            echo "CONFIG_BPF_LSM=y"
-
-            # Wireless subsystem
-            echo "CONFIG_NETDEVICES=y"
-            echo "CONFIG_WLAN=y"
-            echo "CONFIG_WIRELESS=y"
-            echo "CONFIG_CFG80211=m"
-            echo "CONFIG_CFG80211_INTERNAL_REGDB=y"
-            echo "CONFIG_CFG80211_WEXT=y"
-            echo "CONFIG_MAC80211=m"
-            echo "CONFIG_MAC80211_HAS_RC=y"
-            echo "CONFIG_MAC80211_RC_MINSTREL=y"
-            echo "CONFIG_MAC80211_RC_DEFAULT_MINSTREL=y"
-
-            # NetHunter (generic — no device-specific patch needed)
-            echo "CONFIG_PACKET_DIAG=y"
-            echo "CONFIG_USB_G_HID=y"
-            echo "CONFIG_USB_CONFIGFS_F_HID=y"
-            echo "CONFIG_USB_CONFIGFS_MASS_STORAGE=y"
-            echo "CONFIG_TUN=y"
-            echo "CONFIG_NETFILTER_XT_TARGET_TCPMSS=y"
-            echo "CONFIG_NETFILTER_XT_MATCH_STATE=y"
-            echo "CONFIG_IP_NF_TARGET_MASQUERADE=y"
-
-            # Atheros
-            echo "CONFIG_WLAN_VENDOR_ATH=y"
-            echo "CONFIG_ATH9K_HTC=m"
-            echo "CONFIG_ATH_CARDS=m"
-            echo "CONFIG_CARL9170=m"
-
-            # Ralink / RT2800
-            echo "CONFIG_WLAN_VENDOR_RALINK=y"
-            echo "CONFIG_RT2X00=m"
-            echo "CONFIG_RT2X00_LIB=m"
-            echo "CONFIG_RT2X00_LIB_USB=m"
-            echo "CONFIG_RT2800USB=m"
-            echo "CONFIG_RT2800USB_RT33XX=y"
-            echo "CONFIG_RT2800USB_RT35XX=y"
-            echo "CONFIG_RT2800USB_RT3573=y"
-            echo "CONFIG_RT2800USB_RT53XX=y"
-            echo "CONFIG_RT2800USB_RT55XX=y"
-            echo "CONFIG_RT2800USB_UNKNOWN=y"
-
-            # Realtek
-            echo "CONFIG_WLAN_VENDOR_REALTEK=y"
-            echo "CONFIG_RTL8187=m"
-            echo "CONFIG_RTL8192CU=m"
-            echo "CONFIG_RTL8XXXU=m"
-
-            # MediaTek MT7601U
-            echo "CONFIG_WLAN_VENDOR_MEDIATEK=y"
-            echo "CONFIG_MT7601U=m"
-
-            # Firmware + USB
-            echo "CONFIG_FW_LOADER=y"
-            echo "CONFIG_USB_SUPPORT=y"
-            echo "CONFIG_USB_NET_DRIVERS=y"
-            echo "CONFIG_USB_USBNET=y"
-
-            # RFKILL
-            echo "CONFIG_RFKILL=y"
-            echo "CONFIG_RFKILL_LEDS=y"
-
-            # Crypto
-            echo "CONFIG_CRYPTO_ARC4=m"
-            echo "CONFIG_CRYPTO_ECB=m"
-            echo "CONFIG_CRYPTO_AES=y"
-            echo "CONFIG_CRYPTO_MICHAEL_MIC=m"
-            echo "CONFIG_CRC_CCITT=m"
-            echo "CONFIG_CRC_ITU_T=m"
-
-            echo "CONFIG_WERROR=n"
-          } >> gki_defconfig
-
-      # ─── 25: KMI/ABI NEUTRALIZE ───────────────────────────────────
       - name: Disable strict ABI/KMI checks and module list validations
         working-directory: kernel_workspace
         run: |
           set -euo pipefail
           cd common
+
+          # Neutralize check_defconfig call in build.config.gki (harmless if absent)
           sed -i 's/check_defconfig//' build.config.gki 2>/dev/null || true
+
+          # Every one of these needs to be forced to "off"/empty, not just
+          # MODULES_LIST/ORDER/KMI_SYMBOL_LIST — the previous run failed
+          # because KMI_SYMBOL_LIST_STRICT_MODE was left enabled with no
+          # KMI_SYMBOL_LIST to satisfy it. Also drop the ABI check and
+          # KMI enforcement, or build.sh dies at olddefconfig/abi steps too.
           for f in build.config build.config.gki build.config.gki.aarch64 build.config.common build.config.aarch64; do
             [ -f "$f" ] || continue
+
+            # KMI_SYMBOL_LIST, ADDITIONAL_KMI_SYMBOL_LISTS, MODULES_LIST,
+            # MODULES_ORDER are bash strings that can legally span MANY
+            # LINES, e.g.:
+            #   ADDITIONAL_KMI_SYMBOL_LISTS="
+            #   android/abi_gki_aarch64_type_visibility
+            #   android/abi_gki_aarch64_arg
+            #   "
+            # A plain single-line `sed s/^VAR=.*/VAR=/` only rewrites the
+            # opening line and leaves the bare words below it in the file
+            # with no quotes around them anymore — when build.config is
+            # `source`d, bash then tries to *execute* each of those words
+            # as a command ("android/abi_gki_aarch64_type_visibility: No
+            # such file or directory", exit 127). Use a slurp-mode regex
+            # so the WHOLE quoted block (opening line through closing
+            # quote, however many lines it spans) is replaced in one go.
             perl -0777 -i -pe 's/KMI_SYMBOL_LIST="[^"]*"/KMI_SYMBOL_LIST=""/gs' "$f"
             perl -0777 -i -pe 's/ADDITIONAL_KMI_SYMBOL_LISTS="[^"]*"/ADDITIONAL_KMI_SYMBOL_LISTS=""/gs' "$f"
             perl -0777 -i -pe 's/MODULES_LIST="[^"]*"/MODULES_LIST=""/gs' "$f"
             perl -0777 -i -pe 's/MODULES_ORDER="[^"]*"/MODULES_ORDER=""/gs' "$f"
+            # Also handle the unquoted single-token form some configs use
+            # (KMI_SYMBOL_LIST=some/path with no quotes at all).
             sed -i 's/^KMI_SYMBOL_LIST=[^"].*/KMI_SYMBOL_LIST=/' "$f"
             sed -i 's/^ADDITIONAL_KMI_SYMBOL_LISTS=[^"].*/ADDITIONAL_KMI_SYMBOL_LISTS=/' "$f"
             sed -i 's/^MODULES_LIST=[^"].*/MODULES_LIST=/' "$f"
             sed -i 's/^MODULES_ORDER=[^"].*/MODULES_ORDER=/' "$f"
-            grep -q '^KMI_SYMBOL_LIST_STRICT_MODE=' "$f" && sed -i 's/^KMI_SYMBOL_LIST_STRICT_MODE=.*/KMI_SYMBOL_LIST_STRICT_MODE=0/' "$f"
-            grep -q '^TRIM_NONLISTED_KMI=' "$f" && sed -i 's/^TRIM_NONLISTED_KMI=.*/TRIM_NONLISTED_KMI=0/' "$f"
-            grep -q '^KMI_ENFORCED=' "$f" && sed -i 's/^KMI_ENFORCED=.*/KMI_ENFORCED=0/' "$f"
-            grep -q '^ABI_DEFINITION=' "$f" && sed -i 's/^ABI_DEFINITION=.*/ABI_DEFINITION=/' "$f"
-            grep -q '^TIDY_ABI=' "$f" && sed -i 's/^TIDY_ABI=.*/TIDY_ABI=0/' "$f"
-          done
-          echo "---- KMI/ABI lines ----"
-          grep -RhnE '^(KMI_SYMBOL_LIST|KMI_SYMBOL_LIST_STRICT_MODE|ADDITIONAL_KMI_SYMBOL_LISTS|TRIM_NONLISTED_KMI|KMI_ENFORCED|ABI_DEFINITION|TIDY_ABI|MODULES_LIST|MODULES_ORDER)=' build.config* || true
 
-      # ─── 26-27: BUILD + LOCATE ────────────────────────────────────
+            # These are plain single-line booleans/paths — a simple sed is safe.
+            grep -q '^KMI_SYMBOL_LIST_STRICT_MODE=' "$f" && \
+              sed -i 's/^KMI_SYMBOL_LIST_STRICT_MODE=.*/KMI_SYMBOL_LIST_STRICT_MODE=0/' "$f"
+            grep -q '^TRIM_NONLISTED_KMI=' "$f" && \
+              sed -i 's/^TRIM_NONLISTED_KMI=.*/TRIM_NONLISTED_KMI=0/' "$f"
+            grep -q '^KMI_ENFORCED=' "$f" && \
+              sed -i 's/^KMI_ENFORCED=.*/KMI_ENFORCED=0/' "$f"
+            grep -q '^ABI_DEFINITION=' "$f" && \
+              sed -i 's/^ABI_DEFINITION=.*/ABI_DEFINITION=/' "$f"
+            grep -q '^TIDY_ABI=' "$f" && \
+              sed -i 's/^TIDY_ABI=.*/TIDY_ABI=0/' "$f"
+          done
+
+          echo "---- resulting KMI/ABI-related lines ----"
+          grep -RhnE '^(KMI_SYMBOL_LIST|KMI_SYMBOL_LIST_STRICT_MODE|ADDITIONAL_KMI_SYMBOL_LISTS|TRIM_NONLISTED_KMI|KMI_ENFORCED|ABI_DEFINITION|TIDY_ABI|MODULES_LIST|MODULES_ORDER)=' build.config* || true
+          echo "---- sanity check: no orphan bare 'android/...' lines outside quotes ----"
+          grep -RnE '^\s*android/abi_gki' build.config* || echo "clean"
+
       - name: Build kernel
         working-directory: kernel_workspace
         env:
-          BUILD_CONFIG: common/build.config.gki.aarch64
+          # Belt-and-suspenders: build.config.gki does
+          # KMI_SYMBOL_LIST_STRICT_MODE=${KMI_SYMBOL_LIST_STRICT_MODE:-1}
+          # so even if a sed above missed a file, this env var wins because
+          # the default only applies when the var is completely unset.
           KMI_SYMBOL_LIST_STRICT_MODE: "0"
           KMI_ENFORCED: "0"
           TRIM_NONLISTED_KMI: "0"
           TIDY_ABI: "0"
-          LTO: thin
-          USE_CCACHE: "1"
-          CCACHE_DIR: "/home/runner/.ccache"
         run: |
           set -euo pipefail
+          LTO=thin \
+          BUILD_CONFIG=common/build.config.gki.aarch64 \
+          USE_CCACHE=1 \
+          CCACHE_DIR="${CCACHE_DIR}" \
+          KMI_SYMBOL_LIST_STRICT_MODE=0 \
+          KMI_ENFORCED=0 \
+          TRIM_NONLISTED_KMI=0 \
+          TIDY_ABI=0 \
           build/build.sh -j"$(nproc)"
 
       - name: Locate built Image and Modules
@@ -450,29 +496,6 @@ jobs:
           DIST_DIR=$(dirname "${IMG}")
           echo "DIST_DIR=kernel_workspace/${DIST_DIR}" >> "$GITHUB_ENV"
 
-      # ─── 28-29: OUT-OF-TREE + FIRMWARE ────────────────────────────
-      - name: Build aircrack-ng Realtek drivers (out-of-tree, CFI-safe)
-        working-directory: kernel_workspace
-        run: |
-          set -euo pipefail
-          TREE="$PWD"
-          for drv in rtl8812au rtl8821au rtl8814au; do
-            git clone --depth=1 "https://github.com/aircrack-ng/${drv}.git" "/tmp/${drv}" || continue
-            make -C "$TREE" M="/tmp/${drv}" \
-              ARCH=arm64 \
-              CROSS_COMPILE=aarch64-linux-gnu- \
-              CC=clang LD=ld.lld LLVM=1 LLVM_IAS=1 \
-              KCFLAGS="-fsanitize=kcfi -fsanitize=shadow-call-stack" \
-              modules -j"$(nproc)" 2>/dev/null || true
-            find "/tmp/${drv}" -name "*.ko" -exec cp {} "${DIST_DIR}/" \; 2>/dev/null || true
-          done
-
-      - name: Download NetHunter firmware
-        run: |
-          curl -fsSL -o Wireless_Nethunter_Firmware_v3.zip \
-            https://github.com/mizdrake7/kernel_xiaomi_air/releases/download/V4/Wireless_Nethunter_Firmware_v3.zip
-
-      # ─── 30-31: PACKAGE ───────────────────────────────────────────
       - name: Package Clean AnyKernel3 Kernel Zip
         run: |
           set -euo pipefail
@@ -481,57 +504,73 @@ jobs:
           cd ak3
           zip -r9 -q "../${{ github.event.inputs.device_name }}-Blaze-android12-5.10.zip" . -x ".git*"
 
-      - name: Package Magisk Wireless Module
+      - name: Generate Mizdrake7 Style Wireless Magisk Module
         run: |
           set -euo pipefail
           mkdir -p wireless_module/system/lib/modules
-          mkdir -p wireless_module/system/etc/firmware
           mkdir -p wireless_module/META-INF/com/google/android
 
-          find "${{ env.DIST_DIR }}" -name "*.ko" -exec cp {} wireless_module/system/lib/modules/ \; 2>/dev/null || true
-          find kernel_workspace/out -name "*.ko" -exec cp {} wireless_module/system/lib/modules/ \; 2>/dev/null || true
-
-          cd wireless_module/system/etc/firmware
-          unzip -o ../../../../Wireless_Nethunter_Firmware_v3.zip
-          cd ../../../../
+          if [ -f "${{ env.DIST_DIR }}/kernel_modules.tar.gz" ]; then
+            tar -xzf "${{ env.DIST_DIR }}/kernel_modules.tar.gz" -C wireless_module/system/lib/modules
+          else
+            find kernel_workspace/out -name "*.ko" -exec cp {} wireless_module/system/lib/modules/ \; || true
+          fi
 
           cat << 'EOF' > wireless_module/module.prop
-          id=Wireless-NetHunter
+          id=Wireless-firmware
           name=Wireless NetHunter Drivers & Firmware
           version=v3
           versionCode=3
           author=mizdrake7
-          description=NetHunter wireless drivers + firmware for GKI android12-5.10
+          description=NetHunter Wireless Drivers packaged like mizdrake7 style
           EOF
 
           cat << 'EOF' > wireless_module/service.sh
-          #!/system/bin/sh
-          MODDIR=${0%/*}
+          #!/bin/sh
+          sleep 25
           LOG=/data/local/tmp/nethunter_wireless.log
+          MODDIR=/data/adb/modules/Wireless-firmware/system/lib/modules
+
+          echo "===== $(date) =====" >> $LOG
+
           echo /system/etc/firmware > /sys/module/firmware_class/parameters/path 2>>$LOG
 
-          load() {
-            lsmod | grep -q "^$1 " && { echo "$1 already loaded by vendor stack — skipping" >>$LOG; return; }
-            [ -f "$MODDIR/system/lib/modules/$1.ko" ] && insmod "$MODDIR/system/lib/modules/$1.ko" >>$LOG 2>&1
+          load(){
+           MOD="$1"
+           if [ -f "$MODDIR/$MOD.ko" ]; then
+             echo "Loading $MOD" >> $LOG
+             insmod "$MODDIR/$MOD.ko" >>$LOG 2>&1
+           else
+             echo "$MOD missing" >> $LOG
+           fi
           }
 
+          load cfg80211
           load mac80211
+
           load ath
+
           load ath9k_hw
           load ath9k_common
           load ath9k_htc
           load carl9170
+
           load rt2x00lib
           load rt2x00usb
           load rt2800lib
           load rt2800usb
+
           load rtl8187
           load rtl8192cu
-          load rtl8xxxu
+
+          rmmod mt7601u 2>/dev/null
           load mt7601u
-          load 8812au
-          load 8821au
-          load 8814au
+
+          load rtl8xxxu
+
+          dmesg | grep -i -E "mt7601|firmware|cfg80211|mac80211|ath|ath9k|rt2x00|rt2800|rtl8187" >> $LOG 2>&1
+
+          echo "Wireless modules finished" >> $LOG
           EOF
           chmod +x wireless_module/service.sh
 
@@ -540,22 +579,104 @@ jobs:
           OUTFD=$2
           ZIPFILE=$3
           mount /data 2>/dev/null
-          unzip -o "$ZIPFILE" 'system/*' -d /data/adb/modules/Wireless-NetHunter/ 2>/dev/null
-          cp -f "$ZIPFILE" /data/adb/modules/Wireless-NetHunter/module.prop
-          touch /data/adb/modules/Wireless-NetHunter/update
+          unzip -o "$ZIPFILE" 'system/*' -d /data/adb/modules/Wireless-firmware/ 2>/dev/null
+          cp -rf service.sh /data/adb/modules/Wireless-firmware/
+          cp -rf module.prop /data/adb/modules/Wireless-firmware/
+          touch /data/adb/modules/Wireless-firmware/update
           exit 0
           EOF
           chmod +x wireless_module/META-INF/com/google/android/update-binary
 
           cd wireless_module
-          zip -r9 -q "../${{ github.event.inputs.device_name }}-wireless.zip" .
+          zip -r9 -q "../Wireless_Nethunter_Firmware_v3.zip" .
 
-      # ─── 32: UPLOAD ───────────────────────────────────────────────
+      - name: Repack vendor_boot with NetHunter modules (mizdrake7 style, MTK only)
+        run: |
+          set -euo pipefail
+          # This mirrors mizdrake7/Scripts:make-nh-vendorboot_air.sh, which
+          # injects wireless .ko's directly into vendor_boot's ramdisk
+          # (Android boot header v3/v4, MTK unpack_bootimg.py/mkbootimg.py)
+          # instead of loading them via a Magisk module at boot.
+          #
+          # IMPORTANT: that script is written for mizdrake7's own MTK
+          # "air" device tree (Redmi 13C 5G / POCO M6 5G) and expects a
+          # device-provided vendor_boot.img plus mkbootimg tools from that
+          # tree. This job builds a generic GKI (android12-5.10) kernel,
+          # which has no vendor_boot of its own and no device ramdisk to
+          # patch — so this step only activates if you drop a real
+          # vendor_boot.img into the workspace (e.g. pulled from your
+          # target device's stock firmware) before this job runs. If it's
+          # not present, this step no-ops instead of failing the build.
+          VENDOR_BOOT="kernel_workspace/vendor_boot.img"
+          if [ ! -f "$VENDOR_BOOT" ]; then
+            echo "No vendor_boot.img supplied — skipping vendor_boot repack (GKI target has none)."
+            exit 0
+          fi
+
+          sudo apt-get install -y lz4 cpio
+          mkdir -p tools
+          curl -fsSL -o tools/unpack_bootimg.py \
+            https://raw.githubusercontent.com/mizdrake7/Scripts/main/unpack_bootimg.py 2>/dev/null || \
+            echo "unpack_bootimg.py not found upstream at that path — supply your own tools/unpack_bootimg.py from your device's AOSP tree."
+          curl -fsSL -o tools/mkbootimg.py \
+            https://raw.githubusercontent.com/mizdrake7/Scripts/main/mkbootimg.py 2>/dev/null || \
+            echo "mkbootimg.py not found upstream at that path — supply your own tools/mkbootimg.py from your device's AOSP tree."
+
+          if [ ! -s tools/unpack_bootimg.py ] || [ ! -s tools/mkbootimg.py ]; then
+            echo "Required mkbootimg tools missing — skipping vendor_boot repack."
+            exit 0
+          fi
+
+          WORK="$(mktemp -d)"
+          cp "$VENDOR_BOOT" "$WORK/vendor_boot.img"
+          cp Wireless_Nethunter_Firmware_v3.zip "$WORK/nethunter_modules.zip"
+          cd "$WORK"
+
+          python3 "$OLDPWD/tools/unpack_bootimg.py" --boot_img vendor_boot.img --out out > info.txt
+          ORIG_SIZE=$(stat -c "%s" vendor_boot.img)
+          HEADER=$(grep "vendor boot image header version" info.txt | awk '{print $NF}')
+          PAGESIZE=$(grep "page size" info.txt | awk '{print $NF}')
+          BASE=$(grep "kernel load address" info.txt | awk '{print $NF}')
+          RAMDISK_ADDR=$(grep "ramdisk load address" info.txt | awk '{print $NF}')
+          TAGS=$(grep "kernel tags load address" info.txt | awk '{print $NF}')
+          DTB_ADDR=$(grep "dtb address" info.txt | awk '{print $NF}')
+          CMDLINE=$(grep "vendor command line args" info.txt | cut -d: -f2- | sed 's/^ //')
+
+          mkdir ramdisk nh
+          cd ramdisk
+          lz4 -d ../out/vendor_ramdisk00 -c | cpio -idmv >/dev/null
+          cd ../nh
+          unzip -oq ../nethunter_modules.zip
+          cp -fv *.ko ../ramdisk/lib/modules/ 2>/dev/null || echo "no top-level .ko in module zip (check its layout)"
+          cd ../ramdisk
+          find . | cpio -o -H newc 2>/dev/null | lz4 -l > ../vendor_ramdisk_new
+          cd ..
+
+          python3 "$OLDPWD/tools/mkbootimg.py" \
+            --vendor_boot vendor_boot_new.img \
+            --header_version "$HEADER" \
+            --pagesize $((PAGESIZE)) \
+            --base "$BASE" \
+            --kernel_offset 0x0 \
+            --ramdisk_offset $((RAMDISK_ADDR-BASE)) \
+            --tags_offset $((TAGS-BASE)) \
+            --dtb_offset $((DTB_ADDR-BASE)) \
+            --vendor_ramdisk vendor_ramdisk_new \
+            --dtb out/dtb \
+            --vendor_cmdline "$CMDLINE"
+
+          cp vendor_boot_new.img "$OLDPWD/nh-vendor_boot.img"
+          truncate -s "$ORIG_SIZE" "$OLDPWD/nh-vendor_boot.img"
+          cd "$OLDPWD"
+          python3 tools/unpack_bootimg.py --boot_img nh-vendor_boot.img --out /tmp/verify_out
+          echo "Generated nh-vendor_boot.img"
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: ${{ github.event.inputs.device_name }}-build
           path: |
             *.zip
+            nh-vendor_boot.img
           retention-days: 14
           if-no-files-found: warn
