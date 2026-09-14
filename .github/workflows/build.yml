@@ -47,20 +47,37 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y git curl bc bison flex libssl-dev \
             build-essential python3 python3-pip python-is-python3 libncurses-dev \
-            ccache zip unzip device-tree-compiler libelf-dev rsync
-
-      - name: Sanity-check python shim (fixes flask.h / SELinux genheaders failures)
+            ccache zip unzip device-tree-compiler libelf-dev rsync \
+            lld llvm clang
+            
+      - name: Sanity-check toolchain (python shim + LLVM linker)
         run: |
           set -euo pipefail
-          # Several kernel build scripts (scripts/selinux/genheaders, which
-          # generates security/selinux/include/flask.h) call "python", not
-          # "python3". Ubuntu 22.04 runners only ship python3 by default —
-          # if that's missing, genheaders fails silently mid-build and you
-          # only see "flask.h: No such file or directory" much later when
-          # something tries to #include it. python-is-python3 above should
-          # cover it; this just confirms it before we burn build time.
+
+          # 1. python shim — SELinux genheaders scripts call "python"
           command -v python
           python --version
+
+          # 2. LLVM linker — clang with LLVM=1 tries to invoke "ld" on
+          #    the host. If missing, genheaders link fails with:
+          #    "Executable \"ld\" doesn't exist!" and flask.h is never built.
+          if ! command -v ld.lld >/dev/null 2>&1; then
+            echo "::error::ld.lld not found — LLVM=1 host tool links will fail."
+            exit 1
+          fi
+          ld.lld --version
+
+          # 3. Older kernel build scripts invoke bare "ld" even under
+          #    LLVM=1. Symlink ld -> ld.lld so genheaders links cleanly.
+          if ! command -v ld >/dev/null 2>&1; then
+            echo "[+] 'ld' not on PATH — symlinking to ld.lld"
+            sudo ln -sf "$(command -v ld.lld)" /usr/local/bin/ld
+          fi
+          command -v ld
+          ld --version | head -n1
+
+          # 4. Confirm clang is available for host tool builds
+          clang --version | head -n1
 
       - name: Install repo tool
         run: |
@@ -795,6 +812,12 @@ jobs:
           CCACHE_DIR="${CCACHE_DIR}" \
           LLVM=1 \
           LLVM_IAS=1 \
+          LD=ld.lld \
+          AR=llvm-ar \
+          NM=llvm-nm \
+          OBJCOPY=llvm-objcopy \
+          OBJDUMP=llvm-objdump \
+          STRIP=llvm-strip \
           KMI_SYMBOL_LIST_STRICT_MODE=0 \
           KMI_ENFORCED=0 \
           TRIM_NONLISTED_KMI=0 \
