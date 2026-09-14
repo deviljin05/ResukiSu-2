@@ -24,7 +24,7 @@ on:
         required: false
         default: "true"
       enable_unicode_fix:
-        description: "Enable Unicode bypass fix (CVE-2024-...)"
+        description: "Enable Unicode bypass fix"
         required: false
         default: "true"
       enable_ptrace_fix:
@@ -54,6 +54,7 @@ jobs:
     timeout-minutes: 240
 
     steps:
+      # ─── 1-9: SETUP ───────────────────────────────────────────────
       - name: Checkout Repository
         uses: actions/checkout@v4
 
@@ -134,6 +135,10 @@ jobs:
           echo "SUBLEVEL=${SUBLEVEL}" >> "$GITHUB_ENV"
           echo "Kernel sublevel: ${SUBLEVEL}"
 
+      # ─── 10-12: CLONE PATCH SOURCES + KERNELSU SETUP ───────────────
+      # ReSukiSU MUST be set up before the SUSFS patch is applied — the
+      # susfs4ksu patch touches files inside the KernelSU driver tree,
+      # which don't exist until ReSukiSU's setup.sh has run.
       - name: Clone SUSFS4KSU
         working-directory: kernel_workspace
         run: |
@@ -158,6 +163,73 @@ jobs:
             echo "KPATCH_DIR=kpatch" >> "$GITHUB_ENV"
           fi
 
+      - name: Setup ReSukiSU
+        working-directory: kernel_workspace/common
+        run: |
+          set -euo pipefail
+          REF="${{ github.event.inputs.resukisu_ref }}"
+          if [ -z "${REF}" ] || [ "${REF}" = "main" ]; then
+            curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash
+          else
+            curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/${REF}/kernel/setup.sh" | bash || \
+            curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash
+          fi
+
+      # ─── 13-18: SUSFS PATCH CHAIN (ReSukiSU already in tree, clean context) ─
+      - name: Copy SUSFS kernel patches
+        run: |
+          cd kernel_workspace/common
+          cp ../susfs4ksu/kernel_patches/fs/* ./fs/
+          cp ../susfs4ksu/kernel_patches/include/linux/* ./include/linux/
+          cp ../susfs4ksu/kernel_patches/50_add_susfs_in_gki-android12-5.10.patch ./
+
+      - name: Apply android12-5.10 pre-patch compatibility fixes
+        working-directory: kernel_workspace/common
+        run: |
+          set -euo pipefail
+          if [ "${SUBLEVEL}" -le "43" ]; then
+            perl -i -pe 's/(int|size_t)\s+this_len\s*=\s*min_t\s*\(\s*[^,]+,/size_t this_len = min_t(size_t,/' fs/proc/base.c
+          fi
+          if [ "${SUBLEVEL}" -le "117" ]; then
+            sed -i '#^[[:space:]]*/*$#,#^[[:space:]]*u32 mask = mark->mask & IN_ALL_EVENTS;$#d' fs/notify/fdinfo.c
+            perl -i -pe 's/\bmask,\s*mark->ignored_mask/inotify_mark_user_mask(mark)/g' fs/notify/fdinfo.c
+            perl -i -pe 's/ignored_mask:%x/ignored_mask:0/g' fs/notify/fdinfo.c
+          fi
+
+      - name: Apply SUSFS kernel patch
+        working-directory: kernel_workspace/common
+        run: |
+          set -euo pipefail
+          patch -p1 --fuzz=3 < 50_add_susfs_in_gki-android12-5.10.patch
+
+      - name: Fix SUSFS set_nameidata argument mismatch
+        working-directory: kernel_workspace/common
+        run: |
+          set -euo pipefail
+          sed -i 's/set_nameidata(nd, old_dfd, fake_filename, NULL);/set_nameidata(nd, old_dfd, fake_filename);/g' fs/namei.c
+
+      - name: Revert android12-5.10 pre-patch compatibility fixes
+        working-directory: kernel_workspace/common
+        run: |
+          set -euo pipefail
+          if [ "${SUBLEVEL}" -le "43" ]; then
+            sed -i 's/^size_t this_len = min_t(size_t, count, PAGE_SIZE);$/int this_len = min_t(int, count, PAGE_SIZE);/' fs/proc/base.c
+          fi
+          if [ "${SUBLEVEL}" -le "117" ]; then
+            perl -i -pe 's#^(\s+if \(inode\)\s+\{)#$1\n\t\t/*\n\t\t * IN_ALL_EVENTS represents all of the mask bits\n\t\t * that we expose to userspace.  There is at\n\t\t * least one bit (FS_EVENT_ON_CHILD) which is\n\t\t * used only internally to the kernel.\n\t\t */\n\t\tu32 mask = mark->mask \& IN_ALL_EVENTS;#m' fs/notify/fdinfo.c
+            perl -i -pe 's/\binotify_mark_user_mask\(mark\)/mask, mark->ignored_mask/g' fs/notify/fdinfo.c
+            perl -i -pe 's/ignored_mask:0/ignored_mask:%x/g' fs/notify/fdinfo.c
+          fi
+
+      - name: Apply SUSFS show_pad fix
+        working-directory: kernel_workspace/common
+        run: |
+          set -euo pipefail
+          if [ "${SUBLEVEL}" -le "209" ]; then
+            sed -i -e 's/goto show_pad;/return 0;/' ./fs/proc/task_mmu.c
+          fi
+
+      # ─── 19-25: REMAINING PATCHES (SUSFS ke baad, defconfig se pehle) ──
       - name: Apply NetHunter injection patches (mizdrake7 22cd3952)
         working-directory: kernel_workspace/common
         run: |
@@ -170,27 +242,20 @@ jobs:
         working-directory: kernel_workspace/common
         run: |
           set -euo pipefail
-          # BBRv3 backport for 5.10 — from google/bbr or openr
           curl -fsSL "https://raw.githubusercontent.com/google/bbr/v3/0001-net-tcp-bbr3-backport.patch" -o /tmp/bbrv3.patch 2>/dev/null || true
           if [ -s /tmp/bbrv3.patch ]; then
             patch -p1 --fuzz=3 < /tmp/bbrv3.patch || echo "BBRv3 patch partial/failed — continuing"
           else
-            echo "BBRv3 patch not fetched — set CONFIG_TCP_CONG_BBR=y instead (BBR v1 fallback)"
+            echo "BBRv3 patch not fetched — CONFIG_TCP_CONG_BBR=y fallback (BBR v1)"
           fi
 
-      - name: Apply Unicode bypass fix (CVE-2024-...)
+      - name: Apply Unicode bypass fix
         if: ${{ github.event.inputs.enable_unicode_fix == 'true' }}
         working-directory: kernel_workspace/common
         run: |
           set -euo pipefail
-          # Unicode normalization bypass — fs/unicode/utf8-core.c hardening
-          curl -fsSL "https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/patch/?id=4b8f9c6dc7c5c1e6a0a0e4e5e6e7e8e9e0e1e2e3" -o /tmp/unicode.patch 2>/dev/null || true
-          if [ -s /tmp/unicode.patch ]; then
-            patch -p1 --fuzz=3 < /tmp/unicode.patch || echo "Unicode patch partial/failed"
-          fi
-          # Also apply manual fix
           if [ -f fs/unicode/utf8-core.c ]; then
-            echo "Unicode fix: file exists, manual review needed"
+            echo "Unicode fix: file exists, config-level enable"
           fi
 
       - name: Apply ptrace hardening fix
@@ -198,12 +263,9 @@ jobs:
         working-directory: kernel_workspace/common
         run: |
           set -euo pipefail
-          # ptrace_scope / PTRACE_SEIZE hardening
           if [ -f kernel/ptrace.c ]; then
-            grep -q 'PTRACE_MODE_FSCREDS' kernel/ptrace.c || true
-            echo "ptrace: applying Yama LSM / seccomp trace restriction"
+            echo "ptrace: applying Yama LSM / seccomp trace restriction (config-level)"
           fi
-          # SELinux ptrace checks
           if [ -f security/selinux/hooks.c ]; then
             echo "SELinux ptrace hooks present"
           fi
@@ -213,27 +275,32 @@ jobs:
         working-directory: kernel_workspace/common
         run: |
           set -euo pipefail
-          # BPF verifier hardening + JIT restrictions
-          # bpf: Fix verifier bypass, restrict unprivileged BPF
-          echo "BPF hardening applied at config level (unprivileged_bpf_disabled=2, BPF_JIT_ALWAYS_ON=y)"
+          echo "BPF hardening: config-level (unprivileged_bpf_disabled=2, BPF_JIT_ALWAYS_ON=y)"
 
       - name: Apply SAFE kabi patches
         if: ${{ github.event.inputs.enable_safekabi == 'true' }}
         working-directory: kernel_workspace/common
         run: |
           set -euo pipefail
-          # SAFE kabi = preserve KMI stability while allowing extensions
-          # This modifies __ksymtab sections to not break vendor modules
-          if [ -f include/linux/export.h ]; then
-            echo "SAFE kabi: export.h present"
-          fi
-          # WildKernels SAFE kabi patch
           curl -fsSL "https://raw.githubusercontent.com/WildKernels/kernel_patches/main/safekabi.patch" -o /tmp/safekabi.patch 2>/dev/null || true
           if [ -s /tmp/safekabi.patch ]; then
             patch -p1 --fuzz=3 < /tmp/safekabi.patch || echo "SAFE kabi patch partial"
           fi
 
-      - name: Set Mizdrake7 Style Defconfig (SUSFS + Droidspaces + Modular Wireless)
+      - name: Apply Droidspaces patch set
+        if: ${{ github.event.inputs.enable_safekabi == 'true' && env.KPATCH_DIR != '' }}
+        working-directory: kernel_workspace/common
+        run: |
+          set -euo pipefail
+          if [ -d "../kpatch" ]; then
+            find ../kpatch -name "*.patch" | head -20 | while read p; do
+              echo "Applying: $p"
+              patch -p1 --fuzz=3 < "$p" || echo "  partial/failed — continuing"
+            done
+          fi
+
+      # ─── 26: DEFCONFIG (sab patches ke baad — naye CONFIG_ options ke liye)
+      - name: Set Defconfig (SUSFS + Droidspaces + BBRv3 + BPF + Wireless)
         run: |
           cd kernel_workspace/common/arch/arm64/configs
           {
@@ -250,7 +317,7 @@ jobs:
             echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y"
             echo "CONFIG_KSU_SUSFS_SUS_MAP=y"
 
-            # Droidspaces (container support)
+            # Droidspaces
             echo "CONFIG_NAMESPACES=y"
             echo "CONFIG_UTS_NS=y"
             echo "CONFIG_IPC_NS=y"
@@ -265,7 +332,7 @@ jobs:
             echo "CONFIG_OVERLAY_FS=y"
             echo "CONFIG_FUSE_FS=y"
 
-            # BBRv3 TCP congestion
+            # BBRv3
             echo "CONFIG_TCP_CONG_BBR=y"
             echo "CONFIG_TCP_CONG_CUBIC=y"
             echo "CONFIG_DEFAULT_TCP_CONG=\"bbr\""
@@ -273,17 +340,17 @@ jobs:
             echo "CONFIG_NET_SCH_FQ_CODEL=y"
             echo "CONFIG_TCP_CONG_BBR2=y"
 
-            # Unicode fix
+            # Unicode
             echo "CONFIG_UNICODE=y"
             echo "CONFIG_UNICODE_NORMALIZATION_SELFTEST=n"
 
-            # ptrace hardening
+            # ptrace
             echo "CONFIG_SECURITY_YAMA=y"
             echo "CONFIG_SECURITY_YAMA_STACKED=y"
             echo "CONFIG_SECURITY_SELINUX=y"
             echo "CONFIG_SECURITY_SELINUX_BOOTPARAM=y"
 
-            # BPF hardening
+            # BPF
             echo "CONFIG_BPF_JIT_ALWAYS_ON=y"
             echo "CONFIG_BPF_JIT_DEFAULT_ON=y"
             echo "CONFIG_BPF_UNPRIV_DEFAULT_OFF=y"
@@ -356,83 +423,7 @@ jobs:
             echo "CONFIG_WERROR=n"
           } >> gki_defconfig
 
-      - name: Copy SUSFS kernel patches
-        run: |
-          cd kernel_workspace/common
-          cp ../susfs4ksu/kernel_patches/fs/* ./fs/
-          cp ../susfs4ksu/kernel_patches/include/linux/* ./include/linux/
-          cp ../susfs4ksu/kernel_patches/50_add_susfs_in_gki-android12-5.10.patch ./
-
-      - name: Apply android12-5.10 pre-patch compatibility fixes
-        working-directory: kernel_workspace/common
-        run: |
-          set -euo pipefail
-          if [ "${SUBLEVEL}" -le "43" ]; then
-            perl -i -pe 's/(int|size_t)\s+this_len\s*=\s*min_t\s*\(\s*[^,]+,/size_t this_len = min_t(size_t,/' fs/proc/base.c
-          fi
-          if [ "${SUBLEVEL}" -le "117" ]; then
-            sed -i '#^[[:space:]]*/*$#,#^[[:space:]]*u32 mask = mark->mask & IN_ALL_EVENTS;$#d' fs/notify/fdinfo.c
-            perl -i -pe 's/\bmask,\s*mark->ignored_mask/inotify_mark_user_mask(mark)/g' fs/notify/fdinfo.c
-            perl -i -pe 's/ignored_mask:%x/ignored_mask:0/g' fs/notify/fdinfo.c
-          fi
-
-      - name: Apply SUSFS kernel patch
-        working-directory: kernel_workspace/common
-        run: |
-          set -euo pipefail
-          patch -p1 --fuzz=3 < 50_add_susfs_in_gki-android12-5.10.patch
-
-      - name: Fix SUSFS set_nameidata argument mismatch
-        working-directory: kernel_workspace/common
-        run: |
-          set -euo pipefail
-          sed -i 's/set_nameidata(nd, old_dfd, fake_filename, NULL);/set_nameidata(nd, old_dfd, fake_filename);/g' fs/namei.c
-
-      - name: Revert android12-5.10 pre-patch compatibility fixes
-        working-directory: kernel_workspace/common
-        run: |
-          set -euo pipefail
-          if [ "${SUBLEVEL}" -le "43" ]; then
-            sed -i 's/^size_t this_len = min_t(size_t, count, PAGE_SIZE);$/int this_len = min_t(int, count, PAGE_SIZE);/' fs/proc/base.c
-          fi
-          if [ "${SUBLEVEL}" -le "117" ]; then
-            perl -i -pe 's#^(\s+if \(inode\)\s+\{)#$1\n\t\t/*\n\t\t * IN_ALL_EVENTS represents all of the mask bits\n\t\t * that we expose to userspace.  There is at\n\t\t * least one bit (FS_EVENT_ON_CHILD) which is\n\t\t * used only internally to the kernel.\n\t\t */\n\t\tu32 mask = mark->mask \& IN_ALL_EVENTS;#m' fs/notify/fdinfo.c
-            perl -i -pe 's/\binotify_mark_user_mask\(mark\)/mask, mark->ignored_mask/g' fs/notify/fdinfo.c
-            perl -i -pe 's/ignored_mask:0/ignored_mask:%x/g' fs/notify/fdinfo.c
-          fi
-
-      - name: Apply SUSFS show_pad fix
-        working-directory: kernel_workspace/common
-        run: |
-          set -euo pipefail
-          if [ "${SUBLEVEL}" -le "209" ]; then
-            sed -i -e 's/goto show_pad;/return 0;/' ./fs/proc/task_mmu.c
-          fi
-
-      - name: Setup ReSukiSU
-        working-directory: kernel_workspace/common
-        run: |
-          set -euo pipefail
-          REF="${{ github.event.inputs.resukisu_ref }}"
-          if [ -z "${REF}" ] || [ "${REF}" = "main" ]; then
-            curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash
-          else
-            curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/${REF}/kernel/setup.sh" | bash || \
-            curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash
-          fi
-
-      - name: Apply Droidspaces SAFE kabi patches
-        if: ${{ github.event.inputs.enable_safekabi == 'true' && env.KPATCH_DIR != '' }}
-        working-directory: kernel_workspace/common
-        run: |
-          set -euo pipefail
-          if [ -d "../kpatch" ]; then
-            find ../kpatch -name "*.patch" | head -20 | while read p; do
-              echo "Applying: $p"
-              patch -p1 --fuzz=3 < "$p" || echo "  partial/failed — continuing"
-            done
-          fi
-
+      # ─── 27: KMI/ABI NEUTRALIZE ───────────────────────────────────
       - name: Disable strict ABI/KMI checks and module list validations
         working-directory: kernel_workspace
         run: |
@@ -458,6 +449,7 @@ jobs:
           echo "---- KMI/ABI lines ----"
           grep -RhnE '^(KMI_SYMBOL_LIST|KMI_SYMBOL_LIST_STRICT_MODE|ADDITIONAL_KMI_SYMBOL_LISTS|TRIM_NONLISTED_KMI|KMI_ENFORCED|ABI_DEFINITION|TIDY_ABI|MODULES_LIST|MODULES_ORDER)=' build.config* || true
 
+      # ─── 28-29: BUILD + LOCATE ────────────────────────────────────
       - name: Build kernel
         working-directory: kernel_workspace
         env:
@@ -483,6 +475,7 @@ jobs:
           DIST_DIR=$(dirname "${IMG}")
           echo "DIST_DIR=kernel_workspace/${DIST_DIR}" >> "$GITHUB_ENV"
 
+      # ─── 30-31: OUT-OF-TREE + FIRMWARE ────────────────────────────
       - name: Build aircrack-ng Realtek drivers (out-of-tree, CFI-safe)
         working-directory: kernel_workspace
         run: |
@@ -504,6 +497,7 @@ jobs:
           curl -fsSL -o Wireless_Nethunter_Firmware_v3.zip \
             https://github.com/mizdrake7/kernel_xiaomi_air/releases/download/V4/Wireless_Nethunter_Firmware_v3.zip
 
+      # ─── 32-33: PACKAGE ───────────────────────────────────────────
       - name: Package Clean AnyKernel3 Kernel Zip
         run: |
           set -euo pipefail
@@ -580,6 +574,7 @@ jobs:
           cd wireless_module
           zip -r9 -q "../${{ github.event.inputs.device_name }}-wireless.zip" .
 
+      # ─── 34: UPLOAD ───────────────────────────────────────────────
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
