@@ -1,14 +1,14 @@
-name: Build GKI NetHunter Wireless (android12-5.10)
+name: Build Custom GKI Kernel (ReSukiSU + SUSFS + BBRv3 + Mizdrake7 Wireless + NetHunter)
 
 on:
   workflow_dispatch:
     inputs:
-      ack_tag:
-        description: "Exact ACK tag (e.g. android12-5.10.264_r00)"
+      os_patch_level:
+        description: "'lts' = rolling LTS branch or pin an exact GKI release tag"
         required: true
         default: "android12-5.10.264_r00"
       susfs_commit:
-        description: "SUSFS commit hash (empty = latest gki-android12-5.10)"
+        description: "SUSFS commit hash (leave empty = latest)"
         required: false
         default: ""
       resukisu_ref:
@@ -16,9 +16,9 @@ on:
         required: false
         default: "main"
       device_name:
-        description: "Artifact label"
+        description: "Optional label for artifact naming"
         required: false
-        default: "gki-nethunter-wireless"
+        default: "gki-custom"
 
 env:
   VERSION: android12-5.10
@@ -30,10 +30,10 @@ jobs:
     timeout-minutes: 180
 
     steps:
-      - name: Checkout
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Free disk space
+      - name: Free up disk space
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc || true
           sudo apt-get clean
@@ -54,27 +54,59 @@ jobs:
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
 
-      - name: Setup ccache
+      - name: Set up ccache
         run: mkdir -p "${CCACHE_DIR}"
 
-      - name: Sync ACK source at exact tag
+      - name: Resolve manifest branch and optional pinned release tag
+        run: |
+          set -euo pipefail
+          INPUT="${{ github.event.inputs.os_patch_level }}"
+          if [ "${INPUT}" = "lts" ]; then
+            MANIFEST_REF="common-${VERSION}-lts"
+            PIN_REF=""
+            PIN_TYPE=""
+          elif [[ "${INPUT}" =~ ^${VERSION}\.[0-9]+_r[0-9]+$ ]]; then
+            MANIFEST_REF="common-${VERSION}"
+            PIN_REF="${INPUT}"
+            PIN_TYPE="tag"
+          else
+            MANIFEST_REF="common-${VERSION}"
+            PIN_REF="${INPUT}"
+            PIN_TYPE="branch"
+          fi
+          echo "MANIFEST_REF=${MANIFEST_REF}" >> "$GITHUB_ENV"
+          echo "PIN_REF=${PIN_REF}" >> "$GITHUB_ENV"
+          echo "PIN_TYPE=${PIN_TYPE}" >> "$GITHUB_ENV"
+
+      - name: Sync GKI kernel source
         run: |
           set -euo pipefail
           mkdir -p kernel_workspace
           cd kernel_workspace
-          repo init -u https://android.googlesource.com/kernel/manifest \
-            -b common-${VERSION} --depth=1
+          repo init -u https://android.googlesource.com/kernel/manifest -b "${MANIFEST_REF}" --depth=1
           repo sync -c --current-branch --no-clone-bundle --no-tags -j"$(nproc)"
 
-      - name: Pin kernel/common to exact tag
+      - name: Pin kernel/common to exact tag or branch
+        if: ${{ env.PIN_TYPE != '' }}
         working-directory: kernel_workspace/common
         run: |
           set -euo pipefail
-          TAG="${{ github.event.inputs.ack_tag }}"
-          REMOTE="$(git remote | head -n1)"
-          git fetch --depth=1 "$REMOTE" "refs/tags/${TAG}:refs/tags/${TAG}"
-          git checkout "refs/tags/${TAG}"
-          echo "Pinned to: ${TAG}"
+          REMOTE_NAME="$(git remote | head -n1)"
+          [ -n "${REMOTE_NAME}" ]
+          if [ "${PIN_TYPE}" = "tag" ]; then
+            git fetch --depth=1 "${REMOTE_NAME}" "refs/tags/${PIN_REF}:refs/tags/${PIN_REF}"
+            git checkout "refs/tags/${PIN_REF}"
+          else
+            git fetch --depth=1 "${REMOTE_NAME}" "refs/heads/${PIN_REF}:refs/remotes/${REMOTE_NAME}/${PIN_REF}"
+            git checkout -B "${PIN_REF}" "refs/remotes/${REMOTE_NAME}/${PIN_REF}"
+          fi
+
+      - name: Detect kernel sublevel
+        working-directory: kernel_workspace
+        run: |
+          set -euo pipefail
+          SUBLEVEL="$(grep -m1 '^SUBLEVEL = ' common/Makefile | awk '{print $3}')"
+          echo "SUBLEVEL=${SUBLEVEL}" >> "$GITHUB_ENV"
 
       - name: Clone SUSFS4KSU
         working-directory: kernel_workspace
@@ -83,7 +115,6 @@ jobs:
           git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android12-5.10 susfs4ksu
           cd susfs4ksu
           if [ -n "${{ github.event.inputs.susfs_commit }}" ]; then
-            git fetch --depth=1 origin "${{ github.event.inputs.susfs_commit }}" 2>/dev/null || true
             git checkout "${{ github.event.inputs.susfs_commit }}"
           fi
           echo "SUSFS_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
@@ -92,8 +123,89 @@ jobs:
         working-directory: kernel_workspace/common
         run: |
           set -euo pipefail
-          curl -fsSL "https://github.com/mizdrake7/kernel_xiaomi_air/commit/22cd39520ec91fc9e8e622c5deae1994abbd0f55.patch" -o /tmp/nethunter.patch
-          patch -p1 --fuzz=3 < /tmp/nethunter.patch
+          curl -fsSL "https://github.com/mizdrake7/kernel_xiaomi_air/commit/22cd39520ec91fc9e8e622c5deae1994abbd0f55.patch" -o /tmp/nethunter-injection.patch
+          patch -p1 --fuzz=3 < /tmp/nethunter-injection.patch
+
+      - name: Set Mizdrake7 Style Defconfig (SUSFS + Modular Wireless)
+        run: |
+          cd kernel_workspace/common/arch/arm64/configs
+          {
+            echo "CONFIG_KSU=y"
+            echo "CONFIG_KSU_SUSFS=y"
+            echo "CONFIG_KSU_SUSFS_SUS_PATH=y"
+            echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y"
+            echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y"
+            echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y"
+            echo "CONFIG_KSU_SUSFS_ENABLE_LOG=y"
+            echo "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y"
+            echo "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y"
+            echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y"
+            echo "CONFIG_KSU_SUSFS_SUS_MAP=y"
+
+            # Wireless subsystem
+            echo "CONFIG_NETDEVICES=y"
+            echo "CONFIG_WLAN=y"
+            echo "CONFIG_WIRELESS=y"
+            echo "CONFIG_CFG80211=m"
+            echo "CONFIG_CFG80211_INTERNAL_REGDB=y"
+            echo "CONFIG_MAC80211=m"
+            echo "CONFIG_MAC80211_HAS_RC=y"
+            echo "CONFIG_MAC80211_RC_MINSTREL=y"
+            echo "CONFIG_MAC80211_RC_DEFAULT_MINSTREL=y"
+
+            # NetHunter
+            echo "CONFIG_PACKET_DIAG=y"
+            echo "CONFIG_USB_G_HID=y"
+
+            # Atheros
+            echo "CONFIG_WLAN_VENDOR_ATH=y"
+            echo "CONFIG_ATH9K_HTC=m"
+            echo "CONFIG_ATH_CARDS=m"
+            echo "CONFIG_CARL9170=m"
+
+            # Ralink / RT2800
+            echo "CONFIG_WLAN_VENDOR_RALINK=y"
+            echo "CONFIG_RT2X00=m"
+            echo "CONFIG_RT2X00_LIB=m"
+            echo "CONFIG_RT2X00_LIB_USB=m"
+            echo "CONFIG_RT2800USB=m"
+            echo "CONFIG_RT2800USB_RT33XX=y"
+            echo "CONFIG_RT2800USB_RT35XX=y"
+            echo "CONFIG_RT2800USB_RT3573=y"
+            echo "CONFIG_RT2800USB_RT53XX=y"
+            echo "CONFIG_RT2800USB_RT55XX=y"
+            echo "CONFIG_RT2800USB_UNKNOWN=y"
+
+            # Realtek
+            echo "CONFIG_WLAN_VENDOR_REALTEK=y"
+            echo "CONFIG_RTL8187=m"
+            echo "CONFIG_RTL8192CU=m"
+            echo "CONFIG_RTL8XXXU=m"
+
+            # MediaTek MT7601U
+            echo "CONFIG_WLAN_VENDOR_MEDIATEK=y"
+            echo "CONFIG_MT7601U=m"
+
+            # Firmware + USB
+            echo "CONFIG_FW_LOADER=y"
+            echo "CONFIG_USB_SUPPORT=y"
+            echo "CONFIG_USB_NET_DRIVERS=y"
+            echo "CONFIG_USB_USBNET=y"
+
+            # RFKILL
+            echo "CONFIG_RFKILL=y"
+            echo "CONFIG_RFKILL_LEDS=y"
+
+            # Crypto
+            echo "CONFIG_CRYPTO_ARC4=m"
+            echo "CONFIG_CRYPTO_ECB=m"
+            echo "CONFIG_CRYPTO_AES=y"
+            echo "CONFIG_CRYPTO_MICHAEL_MIC=m"
+            echo "CONFIG_CRC_CCITT=m"
+            echo "CONFIG_CRC_ITU_T=m"
+
+            echo "CONFIG_WERROR=n"
+          } >> gki_defconfig
 
       - name: Copy SUSFS kernel patches
         run: |
@@ -102,56 +214,65 @@ jobs:
           cp ../susfs4ksu/kernel_patches/include/linux/* ./include/linux/
           cp ../susfs4ksu/kernel_patches/50_add_susfs_in_gki-android12-5.10.patch ./
 
-      - name: Detect kernel sublevel
-        working-directory: kernel_workspace
+      - name: Apply android12-5.10 pre-patch compatibility fixes
+        working-directory: kernel_workspace/common
         run: |
           set -euo pipefail
-          SUBLEVEL="$(grep -m1 '^SUBLEVEL = ' common/Makefile | awk '{print $3}')"
-          echo "SUBLEVEL=${SUBLEVEL}" >> "$GITHUB_ENV"
-          echo "Kernel sublevel: ${SUBLEVEL}"
+          if [ "${SUBLEVEL}" -le "43" ]; then
+            perl -i -pe 's/(int|size_t)\s+this_len\s*=\s*min_t\s*\(\s*[^,]+,/size_t this_len = min_t(size_t,/' fs/proc/base.c
+          fi
+          if [ "${SUBLEVEL}" -le "117" ]; then
+            sed -i '#^[[:space:]]*/*$#,#^[[:space:]]*u32 mask = mark->mask & IN_ALL_EVENTS;$#d' fs/notify/fdinfo.c
+            perl -i -pe 's/\bmask,\s*mark->ignored_mask/inotify_mark_user_mask(mark)/g' fs/notify/fdinfo.c
+            perl -i -pe 's/ignored_mask:%x/ignored_mask:0/g' fs/notify/fdinfo.c
+          fi
 
       - name: Apply SUSFS kernel patch
         working-directory: kernel_workspace/common
         run: |
           set -euo pipefail
           patch -p1 --fuzz=3 < 50_add_susfs_in_gki-android12-5.10.patch
+
+      - name: Fix SUSFS set_nameidata argument mismatch
+        working-directory: kernel_workspace/common
+        run: |
+          set -euo pipefail
           sed -i 's/set_nameidata(nd, old_dfd, fake_filename, NULL);/set_nameidata(nd, old_dfd, fake_filename);/g' fs/namei.c
+
+      - name: Revert android12-5.10 pre-patch compatibility fixes
+        working-directory: kernel_workspace/common
+        run: |
+          set -euo pipefail
+          if [ "${SUBLEVEL}" -le "43" ]; then
+            sed -i 's/^size_t this_len = min_t(size_t, count, PAGE_SIZE);$/int this_len = min_t(int, count, PAGE_SIZE);/' fs/proc/base.c
+          fi
+          if [ "${SUBLEVEL}" -le "117" ]; then
+            perl -i -pe 's#^(\s+if \(inode\)\s+\{)#$1\n\t\t/*\n\t\t * IN_ALL_EVENTS represents all of the mask bits\n\t\t * that we expose to userspace.  There is at\n\t\t * least one bit (FS_EVENT_ON_CHILD) which is\n\t\t * used only internally to the kernel.\n\t\t */\n\t\tu32 mask = mark->mask \& IN_ALL_EVENTS;#m' fs/notify/fdinfo.c
+            perl -i -pe 's/\binotify_mark_user_mask\(mark\)/mask, mark->ignored_mask/g' fs/notify/fdinfo.c
+            perl -i -pe 's/ignored_mask:0/ignored_mask:%x/g' fs/notify/fdinfo.c
+          fi
+
+      - name: Apply SUSFS show_pad fix
+        working-directory: kernel_workspace/common
+        run: |
+          set -euo pipefail
+          if [ "${SUBLEVEL}" -le "209" ]; then
+            sed -i -e 's/goto show_pad;/return 0;/' ./fs/proc/task_mmu.c
+          fi
 
       - name: Setup ReSukiSU
         working-directory: kernel_workspace/common
         run: |
           set -euo pipefail
           REF="${{ github.event.inputs.resukisu_ref }}"
-          if [ "${REF}" = "main" ] || [ -z "${REF}" ]; then
+          if [ -z "${REF}" ] || [ "${REF}" = "main" ]; then
             curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash
           else
             curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/${REF}/kernel/setup.sh" | bash || \
             curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash
           fi
 
-      - name: Configure defconfig (wireless drivers + NetHunter)
-        working-directory: kernel_workspace/common/arch/arm64/configs
-        run: |
-          set -euo pipefail
-          {
-            echo "CONFIG_ATH9K_HTC=m"
-            echo "CONFIG_CARL9170=m"
-            echo "CONFIG_RT2X00=m"
-            echo "CONFIG_RT2800USB=m"
-            echo "CONFIG_RTL8187=m"
-            echo "CONFIG_RTL8192CU=m"
-            echo "CONFIG_RTL8XXXU=m"
-            echo "CONFIG_MT7601U=m"
-            echo "CONFIG_CFG80211_WEXT=y"
-            echo "CONFIG_PACKET_DIAG=y"
-            echo "CONFIG_USB_G_HID=y"
-            echo "CONFIG_CRYPTO_ARC4=m"
-            echo "CONFIG_CRYPTO_MICHAEL_MIC=m"
-            echo "CONFIG_RFKILL=y"
-            echo "CONFIG_RFKILL_LEDS=y"
-          } >> gki_defconfig
-
-      - name: Neutralize KMI/ABI enforcement
+      - name: Disable strict ABI/KMI checks and module list validations
         working-directory: kernel_workspace
         run: |
           set -euo pipefail
@@ -173,6 +294,8 @@ jobs:
             grep -q '^ABI_DEFINITION=' "$f" && sed -i 's/^ABI_DEFINITION=.*/ABI_DEFINITION=/' "$f"
             grep -q '^TIDY_ABI=' "$f" && sed -i 's/^TIDY_ABI=.*/TIDY_ABI=0/' "$f"
           done
+          echo "---- KMI/ABI lines ----"
+          grep -RhnE '^(KMI_SYMBOL_LIST|KMI_SYMBOL_LIST_STRICT_MODE|ADDITIONAL_KMI_SYMBOL_LISTS|TRIM_NONLISTED_KMI|KMI_ENFORCED|ABI_DEFINITION|TIDY_ABI|MODULES_LIST|MODULES_ORDER)=' build.config* || true
 
       - name: Build kernel
         working-directory: kernel_workspace
@@ -189,13 +312,15 @@ jobs:
           set -euo pipefail
           build/build.sh -j"$(nproc)"
 
-      - name: Locate built modules
+      - name: Locate built Image and Modules
         working-directory: kernel_workspace
         run: |
           set -euo pipefail
-          DIST=$(find out -path "*dist" -type d | head -n1)
-          [ -n "${DIST}" ] || DIST="out"
-          echo "DIST_DIR=kernel_workspace/${DIST}" >> "$GITHUB_ENV"
+          IMG=$(find out -path "*dist/Image" | head -n1)
+          [ -n "$IMG" ]
+          echo "IMG_PATH=kernel_workspace/${IMG}" >> "$GITHUB_ENV"
+          DIST_DIR=$(dirname "${IMG}")
+          echo "DIST_DIR=kernel_workspace/${DIST_DIR}" >> "$GITHUB_ENV"
 
       - name: Build aircrack-ng Realtek drivers (out-of-tree, CFI-safe)
         working-directory: kernel_workspace
@@ -218,6 +343,14 @@ jobs:
           curl -fsSL -o Wireless_Nethunter_Firmware_v3.zip \
             https://github.com/mizdrake7/kernel_xiaomi_air/releases/download/V4/Wireless_Nethunter_Firmware_v3.zip
 
+      - name: Package Clean AnyKernel3 Kernel Zip
+        run: |
+          set -euo pipefail
+          git clone --depth=1 https://github.com/WildKernels/AnyKernel3.git -b gki-2.0 ak3
+          cp "${{ env.IMG_PATH }}" ak3/Image
+          cd ak3
+          zip -r9 -q "../${{ github.event.inputs.device_name }}-Blaze-android12-5.10.zip" . -x ".git*"
+
       - name: Package Magisk Wireless Module
         run: |
           set -euo pipefail
@@ -234,11 +367,11 @@ jobs:
 
           cat << 'EOF' > wireless_module/module.prop
           id=Wireless-NetHunter
-          name=GKI NetHunter Wireless Drivers
-          version=v1
-          versionCode=1
-          author=build
-          description=mac80211 + USB WiFi drivers + firmware for GKI android12-5.10
+          name=Wireless NetHunter Drivers & Firmware
+          version=v3
+          versionCode=3
+          author=mizdrake7
+          description=NetHunter wireless drivers + firmware for GKI android12-5.10
           EOF
 
           cat << 'EOF' > wireless_module/service.sh
@@ -252,6 +385,7 @@ jobs:
           }
 
           load mac80211
+          load ath
           load ath9k_hw
           load ath9k_common
           load ath9k_htc
@@ -292,3 +426,4 @@ jobs:
           path: |
             *.zip
           retention-days: 14
+          if-no-files-found: warn
