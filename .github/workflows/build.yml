@@ -117,9 +117,19 @@ jobs:
           echo "    (common for the rolling '-lts' manifest). Looking it up directly."
 
           MANIFEST_FILE="$(grep -rl 'path="prebuilts/clang/host/linux-x86"' .repo/manifests/*.xml .repo/manifest.xml 2>/dev/null | head -n1 || true)"
+
           if [ -z "${MANIFEST_FILE}" ] || [ ! -f "${MANIFEST_FILE}" ]; then
-            echo "::error::No <project path=\"prebuilts/clang/host/linux-x86\"> entry found in any synced manifest XML. This manifest branch doesn't ship a clang toolchain at all — use a dated maintenance branch (e.g. android12-5.10-2026-07) or an exact tag (e.g. android12-5.10.264_r00) instead of 'lts', or vendor your own clang and set CLANG_PREBUILT_BIN."
-            exit 1
+            echo "[!] Not declared in the synced '${MANIFEST_REF}' manifest either (expected for '-lts')."
+            echo "    Falling back to the dated manifest 'common-${VERSION}', which does declare it,"
+            echo "    to find a matching clang revision for this same android12-5.10 track."
+            rm -rf /tmp/manifest-fetch
+            git clone --filter=blob:none --depth=1 -b "common-${VERSION}" \
+              https://android.googlesource.com/kernel/manifest /tmp/manifest-fetch
+            MANIFEST_FILE="$(grep -rl 'path="prebuilts/clang/host/linux-x86"' /tmp/manifest-fetch/*.xml 2>/dev/null | head -n1 || true)"
+            if [ -z "${MANIFEST_FILE}" ] || [ ! -f "${MANIFEST_FILE}" ]; then
+              echo "::error::Couldn't find a prebuilts/clang/host/linux-x86 project in the '-lts' manifest OR the dated 'common-${VERSION}' manifest. This track may not ship a clang toolchain at all — vendor your own and set CLANG_PREBUILT_BIN, or pick an exact GKI release tag (e.g. android12-5.10.264_r00) which is known to declare it."
+              exit 1
+            fi
           fi
 
           PROJ_LINE="$(grep -o '<project[^>]*path="prebuilts/clang/host/linux-x86"[^>]*/\{0,1\}>' "${MANIFEST_FILE}" | head -n1)"
