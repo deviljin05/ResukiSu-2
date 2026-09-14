@@ -103,64 +103,6 @@ jobs:
           repo init -u https://android.googlesource.com/kernel/manifest -b "${MANIFEST_REF}" --depth=1
           repo sync -c --current-branch --no-clone-bundle --no-tags -j"$(nproc)"
 
-      - name: Ensure clang prebuilt toolchain is present (some manifests, esp. 'lts', omit it)
-        working-directory: kernel_workspace
-        run: |
-          set -euo pipefail
-          if find prebuilts/clang/host/linux-x86 -maxdepth 1 -type d -name 'clang-*' 2>/dev/null | grep -q .; then
-            echo "[+] clang prebuilt already present from repo sync"
-            exit 0
-          fi
-
-          echo "[!] No clang prebuilt under prebuilts/clang/host/linux-x86 after repo sync."
-          echo "    This manifest branch (${MANIFEST_REF}) likely doesn't declare that project"
-          echo "    (common for the rolling '-lts' manifest). Looking it up directly."
-
-          MANIFEST_FILE="$(grep -rl 'path="prebuilts/clang/host/linux-x86"' .repo/manifests/*.xml .repo/manifest.xml 2>/dev/null | head -n1 || true)"
-
-          if [ -z "${MANIFEST_FILE}" ] || [ ! -f "${MANIFEST_FILE}" ]; then
-            echo "[!] Not declared in the synced '${MANIFEST_REF}' manifest either (expected for '-lts')."
-            echo "    Falling back to the dated manifest 'common-${VERSION}', which does declare it,"
-            echo "    to find a matching clang revision for this same android12-5.10 track."
-            rm -rf /tmp/manifest-fetch
-            git clone --filter=blob:none --depth=1 -b "common-${VERSION}" \
-              https://android.googlesource.com/kernel/manifest /tmp/manifest-fetch
-            MANIFEST_FILE="$(grep -rl 'path="prebuilts/clang/host/linux-x86"' /tmp/manifest-fetch/*.xml 2>/dev/null | head -n1 || true)"
-            if [ -z "${MANIFEST_FILE}" ] || [ ! -f "${MANIFEST_FILE}" ]; then
-              echo "::error::Couldn't find a prebuilts/clang/host/linux-x86 project in the '-lts' manifest OR the dated 'common-${VERSION}' manifest. This track may not ship a clang toolchain at all — vendor your own and set CLANG_PREBUILT_BIN, or pick an exact GKI release tag (e.g. android12-5.10.264_r00) which is known to declare it."
-              exit 1
-            fi
-          fi
-
-          PROJ_LINE="$(grep -o '<project[^>]*path="prebuilts/clang/host/linux-x86"[^>]*/\{0,1\}>' "${MANIFEST_FILE}" | head -n1)"
-          PROJ_NAME="$(echo "${PROJ_LINE}" | grep -oE 'name="[^"]+"' | head -n1 | cut -d'"' -f2)"
-          PROJ_REV="$(echo "${PROJ_LINE}" | grep -oE 'revision="[^"]+"' | head -n1 | cut -d'"' -f2)"
-
-          if [ -z "${PROJ_NAME}" ] || [ -z "${PROJ_REV}" ]; then
-            echo "::error::Found a prebuilts/clang manifest entry in ${MANIFEST_FILE} but couldn't parse name/revision out of it: ${PROJ_LINE}"
-            exit 1
-          fi
-
-          echo "[+] Manifest declares: name=${PROJ_NAME} revision=${PROJ_REV}"
-          echo "[+] Fetching directly from https://android.googlesource.com/${PROJ_NAME}"
-
-          rm -rf /tmp/clang-fetch
-          git clone --filter=blob:none --no-checkout "https://android.googlesource.com/${PROJ_NAME}" /tmp/clang-fetch
-          cd /tmp/clang-fetch
-          git fetch --depth=1 origin "${PROJ_REV}"
-          git checkout FETCH_HEAD
-          cd -
-
-          mkdir -p prebuilts/clang/host/linux-x86
-          rsync -a --exclude='.git' /tmp/clang-fetch/ prebuilts/clang/host/linux-x86/
-          rm -rf /tmp/clang-fetch
-
-          if ! find prebuilts/clang/host/linux-x86 -maxdepth 1 -type d -name 'clang-*' 2>/dev/null | grep -q .; then
-            echo "::error::Direct fetch of ${PROJ_NAME}@${PROJ_REV} completed but no clang-* directory showed up under prebuilts/clang/host/linux-x86 — the revision may point at a different subpath layout. Inspect manually."
-            exit 1
-          fi
-          echo "[+] clang prebuilt fetched successfully"
-
       - name: Pin kernel/common to exact tag or branch
         if: ${{ env.PIN_TYPE != '' }}
         working-directory: kernel_workspace/common
@@ -834,30 +776,6 @@ jobs:
           echo "---- sanity check: no orphan bare 'android/...' lines outside quotes ----"
           grep -RnE '^\s*android/abi_gki' build.config* || echo "clean"
 
-      - name: Verify LLVM/clang toolchain is present
-        working-directory: kernel_workspace
-        run: |
-          set -euo pipefail
-          # LLVM=1 LLVM_IAS=1 means build.sh expects a full clang+lld
-          # toolchain, normally pulled in by repo sync under
-          # prebuilts/clang/host/linux-x86/. If that sync was shallow,
-          # partial, or the manifest branch doesn't ship it, you get a
-          # late, confusing "clang: No such file or directory" or
-          # "ld.lld: No such file or directory" deep inside build.sh.
-          # Fail fast here with a clear message instead.
-          CLANG_DIR="$(find prebuilts/clang/host/linux-x86 -maxdepth 1 -type d -name 'clang-*' 2>/dev/null | sort | tail -n1 || true)"
-          if [ -z "${CLANG_DIR}" ] || [ ! -x "${CLANG_DIR}/bin/clang" ]; then
-            echo "::error::No usable clang toolchain found under prebuilts/clang/host/linux-x86. repo sync likely didn't pull prebuilts for manifest '${MANIFEST_REF}'. Check that the branch/tag actually ships a clang prebuilt, or vendor one in manually."
-            exit 1
-          fi
-          if [ ! -x "${CLANG_DIR}/bin/ld.lld" ]; then
-            echo "::error::clang found at ${CLANG_DIR} but ld.lld is missing from it. LLVM_IAS=1 build will fail on link. Toolchain dir looks incomplete."
-            exit 1
-          fi
-          echo "[+] Using clang toolchain: ${CLANG_DIR}"
-          "${CLANG_DIR}/bin/clang" --version
-          echo "TOOLCHAIN_BIN=${{ github.workspace }}/kernel_workspace/${CLANG_DIR}/bin" >> "$GITHUB_ENV"
-
       - name: Build kernel
         working-directory: kernel_workspace
         env:
@@ -871,7 +789,6 @@ jobs:
           TIDY_ABI: "0"
         run: |
           set -euo pipefail
-          export PATH="${TOOLCHAIN_BIN}:${PATH}"
           LTO=thin \
           BUILD_CONFIG=common/build.config.gki.aarch64 \
           USE_CCACHE=1 \
